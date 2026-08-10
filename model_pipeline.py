@@ -9,9 +9,13 @@ used purely as a feature extractor.
 
 Provenance
 ----------
-Everything in this file except the TRAINING and PLACEHOLDER sections is consolidated
-from code verified working in Google Colab. Several pieces encode fixes for specific
-crashes and must not be "simplified" back:
+Everything in this file except the PLACEHOLDER sections (11 and 12) is consolidated
+from code verified working in Google Colab, including the Step 5 training loop and
+checkpointing. Deviations from the verified code are marked [beyond verified] at
+their site; hyperparameters not pinned by a verified run are marked [unverified]
+in TrainConfig.
+
+Several pieces encode fixes for specific crashes and must not be "simplified" back:
 
   * GraphAttentionLayer uses separate src/dst score projections that broadcast-add.
     An earlier concat-based implementation materialized a (batch, seq, seq, 2*dim)
@@ -82,16 +86,37 @@ SPLIT_NAMES = ("train", "validation", "test")
 
 @dataclass
 class TrainConfig:
-    """Hyperparameters for the head. Frontend is frozen and has none."""
+    """
+    Hyperparameters for the head. Frontend is frozen and has none.
 
-    hidden_dim: int = 256
-    num_gat_layers: int = 2
-    dropout: float = 0.3
-    learning_rate: float = 1e-4
-    weight_decay: float = 1e-4
+    Defaults marked [verified] reproduce the Step 5 smoke-test run exactly.
+    Defaults marked [unverified] were not pinned by that run — change freely,
+    but do not treat them as proven.
+    """
+
+    hidden_dim: int = 256            # [verified]
+    num_gat_layers: int = 2          # [verified]
+    dropout: float = 0.3             # [verified] AASISTHead default used by the run
+    learning_rate: float = 1e-4      # [verified]
+
+    # [verified] The run called optim.AdamW(head.parameters(), lr=1e-4) and passed
+    # no weight_decay, so it used AdamW's default of 0.01 — NOT 0. Setting this to
+    # anything else diverges from the proven configuration.
+    weight_decay: float = 0.01
+
+    # [unverified] The smoke test ran 15 epochs on 150 clips. 15 is a smoke-test
+    # number, not a tuned one; the full run over 24,881 train clips needs its own
+    # value. Left at the verified 15 so nothing is silently assumed.
+    num_epochs: int = 15
+
+    # [unverified] The run's DataLoader construction was not captured.
     batch_size: int = 16
-    num_epochs: int = 30
-    grad_clip: float = 5.0
+    shuffle_train: bool = True
+
+    # [beyond verified] The proven run had NO gradient clipping. 0.0 disables it
+    # and reproduces that exactly. Set > 0 only as a deliberate experiment.
+    grad_clip: float = 0.0
+
     seed: int = SEED
 
 
@@ -692,13 +717,21 @@ def compute_ece(probs: np.ndarray, labels: np.ndarray, n_bins: int = 10):
 # ============================================================================
 # SECTION 10 — Training
 # ============================================================================
-# NOTE: this section was reconstructed from the description of the verified Colab
-# loop (BCEWithLogitsLoss, AdamW over head params only, checkpoint save/reload),
-# not pasted verbatim like the rest of the file. Diff it against the Colab cells
-# before committing to a full Step 6 run.
+# Reconciled against the verified Step 5 loop (Colab "Cell part 4"/"Cell part 5",
+# loss 0.7146 -> ~0.09 over 15 epochs on a 150-clip subset, checkpoint reload
+# confirmed). The inner loop below is step-for-step identical to that code.
+#
+# The verified run had NO LR scheduler, NO early stopping, and NO gradient
+# clipping. Anything here beyond that is marked [beyond verified] at its site.
 
 def build_optimizer(model: AASISTHead, config: TrainConfig) -> torch.optim.Optimizer:
-    """AdamW over head parameters only — the frontend is frozen and excluded."""
+    """
+    AdamW over head parameters.
+
+    The verified run passed head.parameters() directly. The requires_grad filter
+    here is a no-op for the head (every head parameter is trainable) and exists
+    only to guard against frontend parameters ever being handed in by mistake.
+    """
     trainable = [p for p in model.parameters() if p.requires_grad]
     return torch.optim.AdamW(
         trainable,
@@ -712,31 +745,39 @@ def train_one_epoch(
     loader: DataLoader,
     optimizer: torch.optim.Optimizer,
     criterion: nn.Module,
-    grad_clip: float = 5.0,
+    grad_clip: float = 0.0,
 ) -> float:
-    model.train()
-    total_loss = 0.0
-    total_batches = 0
+    """
+    One training epoch. Returns the mean of the per-batch losses.
 
-    for feats, mask, labels in loader:
-        feats = feats.to(DEVICE)
-        mask = mask.to(DEVICE)
-        labels = labels.to(DEVICE)
+    model.train() is called here rather than once before the epoch loop (as in the
+    verified cell) because train_model() runs a validation pass between epochs,
+    and evaluate() puts the model in eval mode. Without this call, epochs 2+ would
+    train with dropout disabled. This preserves the verified semantics under
+    interleaved validation rather than departing from them.
+    """
+    model.train()
+    epoch_losses: List[float] = []
+
+    for batch_feats, batch_mask, batch_labels in loader:
+        batch_feats = batch_feats.to(DEVICE)
+        batch_mask = batch_mask.to(DEVICE)
+        batch_labels = batch_labels.to(DEVICE)
 
         optimizer.zero_grad()
-        logits = model(feats, mask=mask)
-        loss = criterion(logits, labels)
+        logits = model(batch_feats, mask=batch_mask)
+        loss = criterion(logits, batch_labels)
         loss.backward()
 
+        # [beyond verified] Disabled by default (grad_clip=0.0) to match the run.
         if grad_clip:
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
 
         optimizer.step()
 
-        total_loss += loss.item()
-        total_batches += 1
+        epoch_losses.append(loss.item())
 
-    return total_loss / max(total_batches, 1)
+    return sum(epoch_losses) / max(len(epoch_losses), 1)
 
 
 @torch.no_grad()
@@ -786,23 +827,40 @@ def save_checkpoint(
     model: AASISTHead,
     optimizer: torch.optim.Optimizer,
     epoch: int,
-    metrics: Dict[str, float],
-    config: TrainConfig,
+    loss_history: List[float],
     path: str,
+    metrics: Optional[Dict[str, float]] = None,
+    config: Optional[TrainConfig] = None,
 ) -> str:
-    """Head weights only — the frontend is frozen and reloaded from HF by name."""
+    """
+    Head weights only — the frontend is frozen and reloaded from HF by name.
+
+    The first four keys are the verified checkpoint format and must stay exactly
+    as-is; Step 5 confirmed save/reload against them:
+
+        model_state_dict, optimizer_state_dict, epoch, loss_history
+
+    metrics/config/frontend_model_name are [beyond verified] additions. They are
+    additive only — nothing reading the four verified keys is affected — and
+    `config` is what lets load_checkpoint() rebuild the head without being told
+    its shape. Drop them if the checkpoint format becomes a shared contract.
+    """
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    torch.save(
-        {
-            "epoch": epoch,
-            "model_state_dict": model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "metrics": metrics,
-            "config": config.__dict__,
-            "frontend_model_name": FRONTEND_MODEL_NAME,
-        },
-        path,
-    )
+
+    payload: Dict[str, Any] = {
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "epoch": epoch,
+        "loss_history": loss_history,
+    }
+
+    if metrics is not None:
+        payload["metrics"] = metrics
+    if config is not None:
+        payload["config"] = config.__dict__
+        payload["frontend_model_name"] = FRONTEND_MODEL_NAME
+
+    torch.save(payload, path)
     return path
 
 
@@ -818,6 +876,12 @@ def load_checkpoint(
     ckpt = torch.load(path, map_location=DEVICE)
 
     if model is None:
+        if "config" not in ckpt:
+            raise ValueError(
+                f"Checkpoint {path} carries no 'config' key, so the head shape "
+                "cannot be inferred. Pass an explicit model= built with the same "
+                "hyperparameters used to train it."
+            )
         model = build_model(TrainConfig(**ckpt["config"]))
 
     model.load_state_dict(ckpt["model_state_dict"])
@@ -831,13 +895,23 @@ def load_checkpoint(
 
 def train_model(
     train_features: List[Tuple[torch.Tensor, int]],
-    val_features: List[Tuple[torch.Tensor, int]],
+    val_features: Optional[List[Tuple[torch.Tensor, int]]] = None,
     config: Optional[TrainConfig] = None,
     checkpoint_dir: str = CHECKPOINT_DIR,
+    validate: bool = True,
 ) -> Tuple[AASISTHead, Dict[str, Any]]:
     """
-    Train the head on cached frozen features, checkpointing each epoch and
-    tracking the best validation EER.
+    Train the head on cached frozen features.
+
+    The optimizer/criterion/inner loop match the verified Step 5 cell exactly.
+    Two things here are [beyond verified], because the smoke test had no
+    validation split at all:
+
+      * a validation pass after each epoch, and
+      * best-checkpoint selection on validation EER.
+
+    Selection is not early stopping — training always runs the full num_epochs.
+    Pass validate=False to reproduce the verified train-only behaviour.
     """
     config = config or TrainConfig()
     set_seed(config.seed)
@@ -846,45 +920,66 @@ def train_model(
     optimizer = build_optimizer(model, config)
     criterion = nn.BCEWithLogitsLoss()
 
-    train_loader = make_dataloader(train_features, config.batch_size, shuffle=True)
-    val_loader = make_dataloader(val_features, config.batch_size, shuffle=False)
+    train_loader = make_dataloader(
+        train_features, config.batch_size, shuffle=config.shuffle_train
+    )
+    val_loader = (
+        make_dataloader(val_features, config.batch_size, shuffle=False)
+        if validate and val_features
+        else None
+    )
 
+    loss_history: List[float] = []   # per-epoch mean loss — verified format
     history: List[Dict[str, float]] = []
     best_eer = float("inf")
     best_path = os.path.join(checkpoint_dir, "best_model.pt")
+    last_path = os.path.join(checkpoint_dir, "last_model.pt")
 
     for epoch in range(1, config.num_epochs + 1):
-        train_loss = train_one_epoch(
+        avg_loss = train_one_epoch(
             model, train_loader, optimizer, criterion, config.grad_clip
         )
-        val_metrics = evaluate(model, val_loader, criterion)
+        loss_history.append(avg_loss)
 
-        record = {
-            "epoch": epoch,
-            "train_loss": train_loss,
-            "val_loss": val_metrics.get("loss", float("nan")),
-            "val_eer": val_metrics["eer"],
-        }
+        record: Dict[str, float] = {"epoch": epoch, "train_loss": avg_loss}
+        line = f"Epoch {epoch}/{config.num_epochs} | avg loss: {avg_loss:.4f}"
+
+        val_metrics: Optional[Dict[str, float]] = None
+        if val_loader is not None:
+            val_metrics = evaluate(model, val_loader, criterion)
+            record["val_loss"] = val_metrics.get("loss", float("nan"))
+            record["val_eer"] = val_metrics["eer"]
+            line += (
+                f" | val loss: {record['val_loss']:.4f}"
+                f" | val EER: {val_metrics['eer'] * 100:.2f}%"
+            )
+
         history.append(record)
-
-        print(
-            f"epoch {epoch:>3}/{config.num_epochs}  "
-            f"train_loss={train_loss:.4f}  "
-            f"val_loss={record['val_loss']:.4f}  "
-            f"val_eer={val_metrics['eer'] * 100:.2f}%"
-        )
+        print(line)
 
         save_checkpoint(
-            model, optimizer, epoch, val_metrics, config,
-            os.path.join(checkpoint_dir, "last_model.pt"),
+            model, optimizer, epoch, loss_history, last_path,
+            metrics=val_metrics, config=config,
         )
 
-        if val_metrics["eer"] < best_eer:
+        if val_metrics is not None and val_metrics["eer"] < best_eer:
             best_eer = val_metrics["eer"]
-            save_checkpoint(model, optimizer, epoch, val_metrics, config, best_path)
+            save_checkpoint(
+                model, optimizer, epoch, loss_history, best_path,
+                metrics=val_metrics, config=config,
+            )
             print(f"  new best val EER {best_eer * 100:.2f}% -> {best_path}")
 
-    return model, {"history": history, "best_eer": best_eer, "best_path": best_path}
+    print("\nLoss history:", [round(l, 4) for l in loss_history])
+    print("Loss decreased overall:", loss_history[-1] < loss_history[0])
+
+    return model, {
+        "history": history,
+        "loss_history": loss_history,
+        "best_eer": best_eer if val_loader is not None else None,
+        "best_path": best_path if val_loader is not None else None,
+        "last_path": last_path,
+    }
 
 
 # ============================================================================
