@@ -63,7 +63,14 @@ from torch.utils.data import DataLoader, Dataset
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 SPLIT_FILE = os.path.join(REPO_ROOT, "data_pipeline", "split_ids.json")
-METADATA_FILE = os.path.join(REPO_ROOT, "model_pipeline", "split_metadata_verified.json")
+# Artifacts live in model_pipeline_artifacts/, NOT model_pipeline/. A directory named
+# model_pipeline/ alongside model_pipeline.py is an import trap: once anything imports
+# the name while only the directory exists, Python caches a namespace package in
+# sys.modules and every later `from model_pipeline import ...` fails with
+# "(unknown location)" — even after the .py file appears. Do not recreate that name.
+METADATA_FILE = os.path.join(
+    REPO_ROOT, "model_pipeline_artifacts", "split_metadata_verified.json"
+)
 CHECKPOINT_DIR = os.path.join(REPO_ROOT, "checkpoints")
 FEATURE_CACHE_DIR = os.path.join(REPO_ROOT, "feature_cache")
 
