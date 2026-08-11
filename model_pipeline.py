@@ -621,6 +621,65 @@ def manifest_path(split_name: str, cache_dir: str = FEATURE_CACHE_DIR) -> str:
     return os.path.join(cache_dir, f"{split_name}_manifest.json")
 
 
+def failed_clips_path(cache_dir: str = FEATURE_CACHE_DIR) -> str:
+    return os.path.join(cache_dir, "failed_clips.json")
+
+
+# How many individual failures to print before falling back to the log file only.
+MAX_PRINTED_FAILURES = 20
+
+# If this fraction of attempted clips fails, the problem is systemic (API change,
+# dead network, wrong column) rather than a few bad files — stop instead of
+# burning hours producing an unusable cache.
+ABORT_FAILURE_RATE = 0.25
+ABORT_FAILURE_MIN_ATTEMPTS = 50
+
+
+def read_failed_clips(cache_dir: str = FEATURE_CACHE_DIR) -> List[Dict[str, str]]:
+    path = failed_clips_path(cache_dir)
+    if not os.path.exists(path):
+        return []
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f).get("failures", [])
+
+
+def write_failed_clips(
+    new_failures: List[Dict[str, str]],
+    cache_dir: str = FEATURE_CACHE_DIR,
+) -> str:
+    """
+    Append this run's failures to the cumulative log.
+
+    History is kept rather than overwritten: a clip that fails on every attempt is
+    a genuinely bad file, while one that fails once and later succeeds was a
+    transient network read. That distinction is only visible across runs.
+    """
+    os.makedirs(cache_dir, exist_ok=True)
+    path = failed_clips_path(cache_dir)
+
+    existing = read_failed_clips(cache_dir)
+    combined = existing + new_failures
+
+    by_clip: Dict[str, int] = {}
+    for record in combined:
+        by_clip[record["clip_id"]] = by_clip.get(record["clip_id"], 0) + 1
+
+    payload = {
+        "total_failure_events": len(combined),
+        "distinct_clips": len(by_clip),
+        "repeat_offenders": sorted(
+            (cid for cid, n in by_clip.items() if n > 1),
+        ),
+        "failures": combined,
+    }
+
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+    os.replace(tmp, path)
+    return path
+
+
 def read_manifest(
     split_name: str, cache_dir: str = FEATURE_CACHE_DIR
 ) -> Optional[Dict[str, Any]]:
@@ -638,6 +697,8 @@ def write_manifest(
     complete: bool,
     cache_dir: str = FEATURE_CACHE_DIR,
     capped: Optional[int] = None,
+    expected_clips: Optional[int] = None,
+    failed_clip_ids: Optional[Sequence[str]] = None,
 ) -> str:
     """
     Rewritten after every shard, so a crash leaves a manifest describing exactly
@@ -646,15 +707,30 @@ def write_manifest(
     `capped` records a max_clips_per_split rehearsal limit. Such a cache is
     "complete" for its own purposes but is NOT the full split — callers that
     intend to train for real must check this.
+
+    `expected_clips` and `failed_clip_ids` make a shortfall auditable: a complete
+    cache satisfies num_clips + num_failed == expected_clips, so a split that
+    quietly under-delivers cannot look identical to one that did not.
     """
     os.makedirs(cache_dir, exist_ok=True)
     path = manifest_path(split_name, cache_dir)
+
+    num_clips = sum(s["count"] for s in shards)
+    failed_clip_ids = list(failed_clip_ids or [])
+
     payload = {
         "split": split_name,
         "store_dtype": store_dtype,
         "complete": complete,
         "capped": capped,
-        "num_clips": sum(s["count"] for s in shards),
+        "num_clips": num_clips,
+        "expected_clips": expected_clips,
+        "num_failed": len(failed_clip_ids),
+        "failed_clip_ids": failed_clip_ids,
+        "accounted_for": (
+            None if expected_clips is None
+            else num_clips + len(failed_clip_ids) == expected_clips
+        ),
         "shards": shards,
     }
     tmp = path + ".tmp"
@@ -674,6 +750,7 @@ def _format_duration(seconds: float) -> str:
 def build_feature_caches_streaming(
     targets: Dict[str, set],
     label_lookup: Dict[str, int],
+    language_lookup: Optional[Dict[str, str]] = None,
     cache_dir: str = FEATURE_CACHE_DIR,
     shard_size: int = 500,
     store_dtype: torch.dtype = torch.float16,
@@ -773,8 +850,50 @@ def build_feature_caches_streaming(
 
     buffers: Dict[str, List[Tuple[torch.Tensor, int]]] = {n: [] for n in targets}
     buffer_ids: Dict[str, List[str]] = {n: [] for n in targets}
+
+    # counts = clips actually cached. queued = clips accepted for extraction
+    # (decoded OK, awaiting the batched forward). They diverge when extraction
+    # fails, so the cap and the progress display must not share one counter.
     counts: Dict[str, int] = {n: len(done_ids[n]) for n in targets}
+    queued: Dict[str, int] = {n: len(done_ids[n]) for n in targets}
     bytes_written: Dict[str, int] = {n: 0 for n in targets}
+
+    # Per-clip failures. Recorded rather than raised: across ~28k network-fetched
+    # clips a non-zero decode failure rate is expected, and one unreadable file
+    # must not end the pass.
+    failures: Dict[str, List[Dict[str, str]]] = {n: [] for n in targets}
+    failure_printed = 0
+
+    def record_failure(
+        split_name: str, clip_id: str, stage: str, exc: BaseException
+    ) -> None:
+        nonlocal failure_printed
+
+        record = {
+            "clip_id": clip_id,
+            "split": split_name,
+            "language": (language_lookup or {}).get(clip_id, "unknown"),
+            "stage": stage,
+            "error_type": type(exc).__name__,
+            "error": str(exc)[:500],
+            "seen_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        failures[split_name].append(record)
+
+        if failure_printed < MAX_PRINTED_FAILURES:
+            failure_printed += 1
+            print(
+                f"  SKIP [{split_name}] {clip_id} ({record['language']}) "
+                f"{stage} failed: {record['error_type']}: {record['error'][:160]}"
+            )
+            if failure_printed == MAX_PRINTED_FAILURES:
+                print(
+                    f"  (further failures suppressed; full list in "
+                    f"{os.path.basename(failed_clips_path(cache_dir))})"
+                )
+
+    def total_failures() -> int:
+        return sum(len(v) for v in failures.values())
 
     def flush(name: str, final: bool = False, limit: Optional[int] = None) -> None:
         """
@@ -789,6 +908,8 @@ def build_feature_caches_streaming(
                 write_manifest(
                     name, shards[name], dtype_name, True, cache_dir,
                     capped=max_clips_per_split,
+                    expected_clips=total_wanted[name],
+                    failed_clip_ids=[r["clip_id"] for r in failures[name]],
                 )
             return
 
@@ -814,6 +935,8 @@ def build_feature_caches_streaming(
         write_manifest(
             name, shards[name], dtype_name, final, cache_dir,
             capped=max_clips_per_split,
+            expected_clips=total_wanted[name],
+            failed_clip_ids=[r["clip_id"] for r in failures[name]],
         )
 
         del buffers[name][:take]
@@ -835,18 +958,46 @@ def build_feature_caches_streaming(
 
         t0 = time.time()
         lengths = [len(w) for _, _, w in pending]
+
         for group in _plan_batches(lengths, extract_batch_size, max_batch_samples):
-            feats_list = extract_features_batch(
-                [pending[i][2] for i in group],
-                [TARGET_SAMPLE_RATE] * len(group),
-                device=device,
-            )
+            try:
+                feats_list: List[Optional[torch.Tensor]] = list(
+                    extract_features_batch(
+                        [pending[i][2] for i in group],
+                        [TARGET_SAMPLE_RATE] * len(group),
+                        device=device,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001 — isolate, don't lose the batch
+                # A batch-level failure (CUDA OOM, one pathological tensor) would
+                # otherwise discard every clip in the group. Retry individually so
+                # only the genuinely bad clip is lost.
+                print(
+                    f"  batch of {len(group)} failed "
+                    f"({type(exc).__name__}: {str(exc)[:120]}) — "
+                    "retrying clips individually"
+                )
+                feats_list = []
+                for i in group:
+                    split_name, clip_id, waveform = pending[i]
+                    try:
+                        feats_list.append(
+                            extract_features(waveform, TARGET_SAMPLE_RATE, device)
+                        )
+                    except Exception as inner:  # noqa: BLE001
+                        record_failure(split_name, clip_id, "extract", inner)
+                        feats_list.append(None)
+
             for i, feats in zip(group, feats_list):
+                if feats is None:
+                    continue
                 split_name, clip_id, _ = pending[i]
                 buffers[split_name].append(
                     (feats.to(store_dtype), label_lookup[clip_id])
                 )
                 buffer_ids[split_name].append(clip_id)
+                counts[split_name] += 1
+
         timings["extract"] += time.time() - t0
 
         pending.clear()
@@ -857,9 +1008,21 @@ def build_feature_caches_streaming(
                 flush(name, limit=shard_size)
                 timings["save"] += time.time() - t1
 
+    def unresolved(name: str) -> set:
+        """
+        Target IDs neither cached nor attempted-and-failed.
+
+        Failed clips stay in `remaining` so a later resume retries them (a
+        truncated read is usually transient), but they must not hold the split
+        open as "incomplete" forever — completeness means every clip was
+        accounted for, not that every clip succeeded.
+        """
+        return remaining[name] - {r["clip_id"] for r in failures[name]}
+
     started = time.time()
     scanned = 0
     matched = 0
+    attempted = 0
 
     print(f"Device: {DEVICE}")
     if DEVICE == "cpu":
@@ -907,7 +1070,7 @@ def build_feature_caches_streaming(
 
             if (
                 max_clips_per_split is not None
-                and counts[split_name] >= max_clips_per_split
+                and queued[split_name] >= max_clips_per_split
             ):
                 remaining[split_name].discard(clip_id)
                 continue
@@ -915,16 +1078,41 @@ def build_feature_caches_streaming(
             if clip_id not in label_lookup:
                 raise KeyError(f"Clip {clip_id} is not in the verified metadata.")
 
+            # Decode is the failure-prone step: the bytes arrived over the network
+            # and torchcodec raises on a truncated or corrupt buffer. Catching here
+            # — before the clip is queued — is also what keeps batching safe: a
+            # clip that cannot be decoded never enters a batch, so the batch
+            # correctness guarantees are untouched.
             t_decode = time.time()
-            waveform, sr = decode_audio(ex)
-            waveform = ensure_target_sample_rate(waveform, sr)
+            try:
+                waveform, sr = decode_audio(ex)
+                waveform = ensure_target_sample_rate(waveform, sr)
+            except Exception as exc:  # noqa: BLE001 — one bad file must not end the pass
+                timings["decode"] += time.time() - t_decode
+                attempted += 1
+                # Not discarded from `remaining`: a transient read error should be
+                # retried on the next resume. It is dropped from this pass only.
+                record_failure(split_name, clip_id, "decode", exc)
+
+                if (
+                    attempted >= ABORT_FAILURE_MIN_ATTEMPTS
+                    and total_failures() / attempted >= ABORT_FAILURE_RATE
+                ):
+                    raise RuntimeError(
+                        f"{total_failures():,} of {attempted:,} clips failed "
+                        f"({total_failures() / attempted * 100:.0f}%). That is a "
+                        "systemic failure, not a few bad files — stopping. "
+                        f"See {failed_clips_path(cache_dir)}."
+                    ) from exc
+                continue
             timings["decode"] += time.time() - t_decode
 
             pending.append((split_name, clip_id, waveform))
             del waveform
 
             remaining[split_name].discard(clip_id)
-            counts[split_name] += 1
+            queued[split_name] += 1
+            attempted += 1
             matched += 1
 
             if len(pending) >= extract_batch_size * batch_sort_factor:
@@ -945,20 +1133,24 @@ def build_feature_caches_streaming(
                     f"eta {_format_duration(eta)} | cache {cached_mb:,.0f} MB"
                 )
 
-            if all(not r for r in remaining.values()):
-                print("  all target IDs found — ending stream early.")
+            if all(not unresolved(n) for n in targets):
+                print("  all target IDs accounted for — ending stream early.")
                 break
 
     finally:
         # Runs on success, on KeyboardInterrupt, and on exception, so neither a
-        # pending batch nor a partial buffer is silently lost.
+        # pending batch nor a partial buffer nor the failure log is silently lost.
         try:
             run_pending()
         finally:
             for name in targets:
                 while len(buffers[name]) > shard_size:
                     flush(name, limit=shard_size)
-                flush(name, final=not remaining[name])
+                flush(name, final=not unresolved(name))
+
+            new_failures = [r for name in targets for r in failures[name]]
+            if new_failures:
+                write_failed_clips(new_failures, cache_dir)
 
     elapsed = time.time() - started
     print(
@@ -966,18 +1158,75 @@ def build_feature_caches_streaming(
         f"— scanned {scanned:,}, extracted {matched:,}."
     )
     for name in targets:
-        missing = len(remaining[name])
-        status = "COMPLETE" if not missing else f"INCOMPLETE ({missing:,} not found)"
+        never_seen = len(unresolved(name))
+        n_failed = len(failures[name])
+        status = "COMPLETE" if not never_seen else f"INCOMPLETE ({never_seen:,} unseen)"
         print(
-            f"  [{name}] {counts[name]:,} clips, "
+            f"  [{name}] {counts[name]:,} cached, {n_failed:,} failed, "
             f"{len(shards[name])} shards, "
             f"{bytes_written[name] / 1e9:.2f} GB — {status}"
         )
-        if missing:
+        if never_seen:
             print(
-                f"    WARNING: {missing:,} {name} IDs never appeared in the stream. "
-                "Re-run with resume=True to retry them."
+                f"    WARNING: {never_seen:,} {name} IDs never appeared in the "
+                "stream. Re-run with resume=True to retry them."
             )
+
+    n_failed_total = total_failures()
+    if n_failed_total:
+        print("\n--- DECODE/EXTRACT FAILURES ---")
+        print(
+            f"  {n_failed_total:,} of {attempted:,} attempted clips failed "
+            f"({n_failed_total / max(attempted, 1) * 100:.2f}%)"
+        )
+        for name in targets:
+            if not failures[name]:
+                continue
+            expected = total_wanted[name]
+            print(
+                f"  [{name}] {len(failures[name]):,} failed — "
+                f"{counts[name]:,} cached + {len(failures[name]):,} failed "
+                f"= {counts[name] + len(failures[name]):,} of {expected:,} expected"
+            )
+            by_stage: Dict[str, int] = {}
+            by_error: Dict[str, int] = {}
+            by_language: Dict[str, int] = {}
+            for record in failures[name]:
+                by_stage[record["stage"]] = by_stage.get(record["stage"], 0) + 1
+                by_error[record["error_type"]] = (
+                    by_error.get(record["error_type"], 0) + 1
+                )
+                by_language[record["language"]] = (
+                    by_language.get(record["language"], 0) + 1
+                )
+            print(f"      by stage    : {by_stage}")
+            print(f"      by error    : {by_error}")
+            if len(by_language) <= 8:
+                print(f"      by language : {by_language}")
+
+        print(f"  full log: {failed_clips_path(cache_dir)}")
+
+        repeats = [
+            r["clip_id"]
+            for r in read_failed_clips(cache_dir)
+        ]
+        seen_counts: Dict[str, int] = {}
+        for cid in repeats:
+            seen_counts[cid] = seen_counts.get(cid, 0) + 1
+        persistent = sorted(cid for cid, n in seen_counts.items() if n > 1)
+        if persistent:
+            print(
+                f"  {len(persistent):,} clip(s) have now failed more than once — "
+                "likely genuinely corrupt rather than transient: "
+                f"{persistent[:5]}{'...' if len(persistent) > 5 else ''}"
+            )
+        else:
+            print(
+                "  all failures are first-time — re-running with resume=True will "
+                "retry them, and transient read errors usually succeed."
+            )
+    else:
+        print("\nNo decode or extraction failures.")
 
     _report_timings(timings, elapsed, scanned, matched, targets)
 
@@ -1841,6 +2090,7 @@ def run_step6_training(
     max_clips_per_split: Optional[int] = None,
     skip_extraction: bool = False,
     extract_batch_size: int = 8,
+    max_failure_pct: float = 1.0,
 ) -> Dict[str, Any]:
     """
     Full Step 6 run: guards -> feature cache -> train -> calibrate.
@@ -1908,6 +2158,7 @@ def run_step6_training(
         manifests = build_feature_caches_streaming(
             targets=targets,
             label_lookup=label_lookup,
+            language_lookup=language_lookup,
             cache_dir=cache_dir,
             shard_size=shard_size,
             store_dtype=store_dtype,
@@ -1939,6 +2190,31 @@ def run_step6_training(
                 f"  [{name}] REHEARSAL CACHE — {man['num_clips']:,} clips "
                 f"(cap {cap}). Results are not reportable."
             )
+
+        # Surface any shortfall explicitly. A cache is "complete" once every clip
+        # is accounted for, which includes clips that failed to decode — so the
+        # only way a shortfall becomes visible is by checking it here.
+        n_failed = man.get("num_failed", 0)
+        expected = man.get("expected_clips")
+        if n_failed:
+            pct = n_failed / expected * 100 if expected else 0.0
+            print(
+                f"  [{name}] {man['num_clips']:,} cached, {n_failed:,} failed to "
+                f"decode ({pct:.2f}% of {expected:,})"
+            )
+            if man.get("accounted_for") is False:
+                raise RuntimeError(
+                    f"'{name}' cache does not add up: {man['num_clips']:,} cached "
+                    f"+ {n_failed:,} failed != {expected:,} expected. Refusing to "
+                    "train on a cache whose contents cannot be accounted for."
+                )
+            if pct > max_failure_pct:
+                raise RuntimeError(
+                    f"'{name}' lost {pct:.2f}% of clips to decode failures, above "
+                    f"max_failure_pct={max_failure_pct}%. Investigate "
+                    f"{failed_clips_path(cache_dir)} before training; re-running "
+                    "with resume=True retries failed clips."
+                )
 
     # --- 5. training --------------------------------------------------------
     print("\n[5/6] Preparing datasets...")
