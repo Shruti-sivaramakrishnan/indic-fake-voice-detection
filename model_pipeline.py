@@ -37,6 +37,12 @@ data_pipeline/split_ids.json is Ashitha's frozen stratified split (31,102 clips)
 It is loaded as-is and never regenerated. There is deliberately no code path in
 this file that can produce a split.
 
+[beyond verified] Feature caches default to float16 storage. The Step 5 smoke test
+ran fp32 end to end. fp16 halves both cache size and RAM, which is what makes the
+full train split fit at all (see the MEMORY note in Section 6), but it is a
+numerical change that no verified run covers. Validate it once on the smoke subset
+before trusting a full run, or pass store_dtype=torch.float32 at 2x the cost.
+
 Scope note (15-day compressed timeline): 1 random seed, reduced robustness matrix,
 no ONNX quantization this cycle.
 """
@@ -46,14 +52,15 @@ from __future__ import annotations
 import json
 import os
 import random
+import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, Sampler
 
 
 # ============================================================================
@@ -418,6 +425,27 @@ def extract_features(
 # ============================================================================
 # A full streaming pass plus frontend extraction is the expensive step. Cache the
 # extracted features to disk so training/eval reruns skip both.
+#
+# MEMORY — read before running this at full scale.
+#
+# There are two separate memory problems here, and only one of them is about audio.
+#
+#   1. Raw audio. stream_and_filter_by_ids(need_audio=True) collects every matching
+#      example, decoder object included, into a list before extraction starts.
+#      build_feature_caches_streaming() below fixes this: one clip's audio is
+#      resident at a time and is dropped as soon as its features exist.
+#
+#   2. The features themselves — the larger problem. XLS-R emits 50 frames/sec at
+#      1024 dims, so fp32 features cost ~0.20 MB per second of audio. Across 24,881
+#      train clips that is roughly 15 GB at a 3s average and 25 GB at 5s. Colab's
+#      free tier has ~12.7 GB. Accumulating features in one Python list therefore
+#      OOMs regardless of how carefully the audio is handled, and periodically
+#      re-saving that growing list neither frees memory nor keeps I/O bounded
+#      (re-serializing the whole list every N clips is quadratic).
+#
+# The fix for (2) is sharding: fill a buffer of shard_size clips, write it, clear
+# it. Peak RAM is one shard, and each shard is written exactly once. Training then
+# reads shards back through ShardedFeatureDataset rather than one giant list.
 
 def build_feature_cache(
     examples: Sequence[dict],
@@ -462,6 +490,436 @@ def load_feature_cache(
     if not os.path.exists(path):
         raise FileNotFoundError(f"No feature cache for '{split_name}': {path}")
     return torch.load(path)
+
+
+# ---------------------------------------------------------------------------
+# Sharded streaming cache
+# ---------------------------------------------------------------------------
+
+def shard_path(split_name: str, shard_idx: int, cache_dir: str = FEATURE_CACHE_DIR) -> str:
+    return os.path.join(cache_dir, f"{split_name}_shard_{shard_idx:05d}.pt")
+
+
+def manifest_path(split_name: str, cache_dir: str = FEATURE_CACHE_DIR) -> str:
+    return os.path.join(cache_dir, f"{split_name}_manifest.json")
+
+
+def read_manifest(
+    split_name: str, cache_dir: str = FEATURE_CACHE_DIR
+) -> Optional[Dict[str, Any]]:
+    path = manifest_path(split_name, cache_dir)
+    if not os.path.exists(path):
+        return None
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def write_manifest(
+    split_name: str,
+    shards: List[Dict[str, Any]],
+    store_dtype: str,
+    complete: bool,
+    cache_dir: str = FEATURE_CACHE_DIR,
+    capped: Optional[int] = None,
+) -> str:
+    """
+    Rewritten after every shard, so a crash leaves a manifest describing exactly
+    the shards that finished writing.
+
+    `capped` records a max_clips_per_split rehearsal limit. Such a cache is
+    "complete" for its own purposes but is NOT the full split — callers that
+    intend to train for real must check this.
+    """
+    os.makedirs(cache_dir, exist_ok=True)
+    path = manifest_path(split_name, cache_dir)
+    payload = {
+        "split": split_name,
+        "store_dtype": store_dtype,
+        "complete": complete,
+        "capped": capped,
+        "num_clips": sum(s["count"] for s in shards),
+        "shards": shards,
+    }
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(payload, f)
+    os.replace(tmp, path)  # atomic: never leave a half-written manifest
+    return path
+
+
+def _format_duration(seconds: float) -> str:
+    seconds = int(seconds)
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h:d}h{m:02d}m{s:02d}s" if h else f"{m:d}m{s:02d}s"
+
+
+def build_feature_caches_streaming(
+    targets: Dict[str, set],
+    label_lookup: Dict[str, int],
+    cache_dir: str = FEATURE_CACHE_DIR,
+    shard_size: int = 500,
+    store_dtype: torch.dtype = torch.float16,
+    device: Optional[str] = None,
+    resume: bool = True,
+    progress_every: int = 100,
+    max_clips_per_split: Optional[int] = None,
+) -> Dict[str, Dict[str, Any]]:
+    """
+    Single-pass, memory-bounded feature cache builder.
+
+    Opens the HF stream ONCE and builds caches for every split in `targets`
+    simultaneously (e.g. {"train": train_ids, "validation": val_ids}), because a
+    full pass costs ~20+ minutes and there is no random access to amortise it.
+
+    Per matching example:
+        decode audio -> extract features -> cast to store_dtype -> append tuple
+        -> drop the waveform and the decoder reference immediately.
+
+    Only one clip's raw audio is ever resident, and only one shard's worth of
+    features. Peak RAM is therefore roughly shard_size * per-clip feature size,
+    independent of how many clips the split holds.
+
+    Args:
+        targets: {split_name: set_of_clip_ids}. Splits are disjoint (guaranteed by
+            the frozen split), so each streamed example matches at most one.
+        store_dtype: float16 halves cache size and RAM. See the [beyond verified]
+            note in the module docs — the smoke test ran fp32.
+        resume: skip clip IDs already present in a previous run's shards.
+        max_clips_per_split: cap per split, for a cheap end-to-end rehearsal.
+
+    Returns:
+        {split_name: manifest_dict}
+    """
+    os.makedirs(cache_dir, exist_ok=True)
+    device = device or DEVICE
+    dtype_name = str(store_dtype).replace("torch.", "")
+
+    # --- resume bookkeeping ------------------------------------------------
+    shards: Dict[str, List[Dict[str, Any]]] = {name: [] for name in targets}
+    done_ids: Dict[str, set] = {name: set() for name in targets}
+
+    for name in targets:
+        existing = read_manifest(name, cache_dir) if resume else None
+        if not existing:
+            continue
+        if existing.get("store_dtype") != dtype_name:
+            print(
+                f"[{name}] existing cache is {existing.get('store_dtype')} but "
+                f"store_dtype={dtype_name} was requested — ignoring it and "
+                f"rebuilding from scratch."
+            )
+            continue
+        for shard in existing["shards"]:
+            if os.path.exists(os.path.join(cache_dir, shard["file"])):
+                shards[name].append(shard)
+                done_ids[name].update(shard["clip_ids"])
+        if done_ids[name]:
+            print(f"[{name}] resuming — {len(done_ids[name]):,} clips already cached.")
+
+    # Remaining work per split. Note the stream still has to be scanned in full;
+    # resume saves the GPU extraction, not the scan.
+    remaining = {
+        name: ids - done_ids[name]
+        for name, ids in targets.items()
+    }
+    total_wanted = {
+        name: (
+            len(ids) if max_clips_per_split is None
+            else min(len(ids), max_clips_per_split)
+        )
+        for name, ids in targets.items()
+    }
+
+    if all(not r for r in remaining.values()):
+        print("All requested splits are already cached — nothing to do.")
+        return {
+            name: read_manifest(name, cache_dir) or {}
+            for name in targets
+        }
+
+    buffers: Dict[str, List[Tuple[torch.Tensor, int]]] = {n: [] for n in targets}
+    buffer_ids: Dict[str, List[str]] = {n: [] for n in targets}
+    counts: Dict[str, int] = {n: len(done_ids[n]) for n in targets}
+    bytes_written: Dict[str, int] = {n: 0 for n in targets}
+
+    def flush(name: str, final: bool = False) -> None:
+        """Write one shard and free it. The only place features leave RAM."""
+        if not buffers[name]:
+            if final:
+                write_manifest(
+                    name, shards[name], dtype_name, True, cache_dir,
+                    capped=max_clips_per_split,
+                )
+            return
+
+        idx = len(shards[name])
+        path = shard_path(name, idx, cache_dir)
+        torch.save(buffers[name], path)
+
+        size = os.path.getsize(path)
+        bytes_written[name] += size
+        shards[name].append({
+            "file": os.path.basename(path),
+            "count": len(buffers[name]),
+            "bytes": size,
+            "clip_ids": list(buffer_ids[name]),
+        })
+
+        # Manifest is rewritten here so a crash mid-run leaves a consistent,
+        # resumable record of every shard that made it to disk.
+        write_manifest(
+            name, shards[name], dtype_name, final, cache_dir,
+            capped=max_clips_per_split,
+        )
+
+        buffers[name].clear()
+        buffer_ids[name].clear()
+
+    started = time.time()
+    scanned = 0
+    matched = 0
+    ds = open_stream(need_audio=True)
+
+    print(
+        "Streaming pass: "
+        + ", ".join(f"{n} {len(remaining[n]):,} to extract" for n in targets)
+    )
+
+    try:
+        for ex in ds:
+            scanned += 1
+
+            clip_id = ex["id"]
+            split_name = None
+            for name in targets:
+                if clip_id in remaining[name]:
+                    split_name = name
+                    break
+
+            if split_name is None:
+                continue
+
+            if (
+                max_clips_per_split is not None
+                and counts[split_name] >= max_clips_per_split
+            ):
+                remaining[split_name].discard(clip_id)
+                continue
+
+            if clip_id not in label_lookup:
+                raise KeyError(f"Clip {clip_id} is not in the verified metadata.")
+
+            # Decode -> extract -> discard. `waveform` is the only raw audio alive,
+            # and it goes out of scope on the next iteration.
+            waveform, sr = decode_audio(ex)
+            feats = extract_features(waveform, sampling_rate=sr, device=device)
+            del waveform
+
+            buffers[split_name].append((feats.to(store_dtype), label_lookup[clip_id]))
+            buffer_ids[split_name].append(clip_id)
+            remaining[split_name].discard(clip_id)
+            counts[split_name] += 1
+            matched += 1
+
+            if len(buffers[split_name]) >= shard_size:
+                flush(split_name)
+
+            if progress_every and matched % progress_every == 0:
+                elapsed = time.time() - started
+                rate = matched / elapsed if elapsed else 0.0
+                left = sum(max(total_wanted[n] - counts[n], 0) for n in targets)
+                eta = left / rate if rate else 0.0
+                done_str = ", ".join(
+                    f"{n} {counts[n]:,}/{total_wanted[n]:,}" for n in targets
+                )
+                cached_mb = sum(bytes_written.values()) / 1e6
+                print(
+                    f"  {done_str} | scanned {scanned:,} | "
+                    f"{rate:.1f} clips/s | elapsed {_format_duration(elapsed)} | "
+                    f"eta {_format_duration(eta)} | cache {cached_mb:,.0f} MB"
+                )
+
+            if all(not r for r in remaining.values()):
+                print("  all target IDs found — ending stream early.")
+                break
+
+    finally:
+        # Runs on success, on KeyboardInterrupt, and on exception, so a partial
+        # buffer is never silently lost.
+        for name in targets:
+            flush(name, final=not remaining[name])
+
+    elapsed = time.time() - started
+    print(
+        f"\nStreaming pass complete in {_format_duration(elapsed)} "
+        f"— scanned {scanned:,}, extracted {matched:,}."
+    )
+    for name in targets:
+        missing = len(remaining[name])
+        status = "COMPLETE" if not missing else f"INCOMPLETE ({missing:,} not found)"
+        print(
+            f"  [{name}] {counts[name]:,} clips, "
+            f"{len(shards[name])} shards, "
+            f"{bytes_written[name] / 1e9:.2f} GB — {status}"
+        )
+        if missing:
+            print(
+                f"    WARNING: {missing:,} {name} IDs never appeared in the stream. "
+                "Re-run with resume=True to retry them."
+            )
+
+    return {name: read_manifest(name, cache_dir) or {} for name in targets}
+
+
+class ShardedFeatureDataset(Dataset):
+    """
+    Reads a sharded feature cache without holding it all in RAM.
+
+    Keeps at most `max_cached_shards` shards resident. Pair with
+    ShardBlockShuffleSampler — plain shuffle=True would touch a different shard on
+    almost every __getitem__ and thrash the cache badly.
+    """
+
+    def __init__(
+        self,
+        split_name: str,
+        cache_dir: str = FEATURE_CACHE_DIR,
+        max_cached_shards: int = 2,
+        require_complete: bool = True,
+    ):
+        manifest = read_manifest(split_name, cache_dir)
+        if manifest is None:
+            raise FileNotFoundError(
+                f"No feature cache manifest for '{split_name}' in {cache_dir}."
+            )
+        if require_complete and not manifest.get("complete", False):
+            raise ValueError(
+                f"Feature cache for '{split_name}' is incomplete "
+                f"({manifest['num_clips']:,} clips). Finish the streaming pass, "
+                "or pass require_complete=False to train on the partial cache."
+            )
+
+        self.cache_dir = cache_dir
+        self.split_name = split_name
+        self.manifest = manifest
+        self.shards = manifest["shards"]
+        self.max_cached_shards = max(1, max_cached_shards)
+
+        # Global index -> (shard, offset), via cumulative shard start offsets.
+        self.shard_starts: List[int] = []
+        total = 0
+        for shard in self.shards:
+            self.shard_starts.append(total)
+            total += shard["count"]
+        self.total = total
+
+        self._cache: Dict[int, List[Tuple[torch.Tensor, int]]] = {}
+        self._order: List[int] = []
+
+    def __len__(self) -> int:
+        return self.total
+
+    def _locate(self, idx: int) -> Tuple[int, int]:
+        import bisect
+
+        shard_idx = bisect.bisect_right(self.shard_starts, idx) - 1
+        return shard_idx, idx - self.shard_starts[shard_idx]
+
+    def _get_shard(self, shard_idx: int) -> List[Tuple[torch.Tensor, int]]:
+        if shard_idx in self._cache:
+            return self._cache[shard_idx]
+
+        path = os.path.join(self.cache_dir, self.shards[shard_idx]["file"])
+        data = torch.load(path)
+
+        self._cache[shard_idx] = data
+        self._order.append(shard_idx)
+        while len(self._order) > self.max_cached_shards:
+            self._cache.pop(self._order.pop(0), None)
+
+        return data
+
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, float]:
+        shard_idx, offset = self._locate(idx)
+        feats, label = self._get_shard(shard_idx)[offset]
+        # Cast back to fp32 here so the model always sees the dtype it trained on.
+        return feats.float(), float(label)
+
+    def shard_bounds(self) -> List[Tuple[int, int]]:
+        return [
+            (start, start + shard["count"])
+            for start, shard in zip(self.shard_starts, self.shards)
+        ]
+
+
+class ShardBlockShuffleSampler(Sampler):
+    """
+    Shuffles within a sliding window of shards instead of globally.
+
+    Global shuffling over a sharded cache is pathological: each draw lands in a
+    random shard, so every item costs a shard load. This shuffles the order of
+    shard-groups and shuffles all indices inside a group, giving a shuffle window
+    of window_shards * shard_size clips while keeping shard access sequential.
+
+    window_shards must be <= the dataset's max_cached_shards, or the LRU evicts
+    shards that the current window still needs.
+    """
+
+    def __init__(
+        self,
+        dataset: ShardedFeatureDataset,
+        window_shards: int = 2,
+        seed: int = SEED,
+    ):
+        self.bounds = dataset.shard_bounds()
+        self.window_shards = max(1, window_shards)
+        self.seed = seed
+        self.epoch = 0
+        self.total = len(dataset)
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = epoch
+
+    def __len__(self) -> int:
+        return self.total
+
+    def __iter__(self) -> Iterator[int]:
+        g = random.Random(self.seed + self.epoch)
+
+        groups = [
+            self.bounds[i:i + self.window_shards]
+            for i in range(0, len(self.bounds), self.window_shards)
+        ]
+        g.shuffle(groups)
+
+        for group in groups:
+            indices = [i for start, end in group for i in range(start, end)]
+            g.shuffle(indices)
+            yield from indices
+
+
+def load_sharded_cache_into_memory(
+    split_name: str,
+    cache_dir: str = FEATURE_CACHE_DIR,
+    as_float32: bool = True,
+) -> List[Tuple[torch.Tensor, int]]:
+    """
+    Load an entire sharded cache into one list.
+
+    Only safe for splits that fit in RAM — validation (3,110 clips, ~1-3 GB) does;
+    train (24,881 clips) generally does not. Use ShardedFeatureDataset for train.
+    """
+    manifest = read_manifest(split_name, cache_dir)
+    if manifest is None:
+        raise FileNotFoundError(f"No manifest for '{split_name}' in {cache_dir}.")
+
+    out: List[Tuple[torch.Tensor, int]] = []
+    for shard in manifest["shards"]:
+        data = torch.load(os.path.join(cache_dir, shard["file"]))
+        for feats, label in data:
+            out.append((feats.float() if as_float32 else feats, label))
+    return out
 
 
 # ============================================================================
@@ -610,14 +1068,29 @@ def collate_fn(batch):
 
 
 def make_dataloader(
-    cached_features: List[Tuple[torch.Tensor, int]],
+    features_or_dataset,
     batch_size: int = 16,
     shuffle: bool = False,
+    sampler: Optional[Sampler] = None,
 ) -> DataLoader:
+    """
+    Accepts either an in-memory [(feats, label), ...] list or a Dataset
+    (e.g. ShardedFeatureDataset).
+
+    DataLoader rejects shuffle=True together with a sampler, so a supplied sampler
+    takes precedence.
+    """
+    dataset = (
+        features_or_dataset
+        if isinstance(features_or_dataset, Dataset)
+        else CachedFeatureDataset(features_or_dataset)
+    )
+
     return DataLoader(
-        CachedFeatureDataset(cached_features),
+        dataset,
         batch_size=batch_size,
-        shuffle=shuffle,
+        shuffle=False if sampler is not None else shuffle,
+        sampler=sampler,
         collate_fn=collate_fn,
     )
 
@@ -901,11 +1374,12 @@ def load_checkpoint(
 
 
 def train_model(
-    train_features: List[Tuple[torch.Tensor, int]],
-    val_features: Optional[List[Tuple[torch.Tensor, int]]] = None,
+    train_features,
+    val_features=None,
     config: Optional[TrainConfig] = None,
     checkpoint_dir: str = CHECKPOINT_DIR,
     validate: bool = True,
+    train_sampler: Optional[Sampler] = None,
 ) -> Tuple[AASISTHead, Dict[str, Any]]:
     """
     Train the head on cached frozen features.
@@ -927,12 +1401,18 @@ def train_model(
     optimizer = build_optimizer(model, config)
     criterion = nn.BCEWithLogitsLoss()
 
-    train_loader = make_dataloader(
-        train_features, config.batch_size, shuffle=config.shuffle_train
-    )
+    if train_sampler is not None:
+        train_loader = make_dataloader(
+            train_features, config.batch_size, sampler=train_sampler
+        )
+    else:
+        train_loader = make_dataloader(
+            train_features, config.batch_size, shuffle=config.shuffle_train
+        )
+
     val_loader = (
         make_dataloader(val_features, config.batch_size, shuffle=False)
-        if validate and val_features
+        if validate and val_features is not None and len(val_features)
         else None
     )
 
@@ -943,6 +1423,10 @@ def train_model(
     last_path = os.path.join(checkpoint_dir, "last_model.pt")
 
     for epoch in range(1, config.num_epochs + 1):
+        # Without this the shard-block sampler replays one fixed order every epoch.
+        if train_sampler is not None and hasattr(train_sampler, "set_epoch"):
+            train_sampler.set_epoch(epoch)
+
         avg_loss = train_one_epoch(
             model, train_loader, optimizer, criterion, config.grad_clip
         )
@@ -1062,37 +1546,229 @@ def evaluate_dataset(clip_ids: Sequence[str], labels: Sequence[int]) -> dict:
 # ============================================================================
 # SECTION 12 — Step 6: full training run
 # ============================================================================
-# PLACEHOLDER. This is the end-to-end script that ties Sections 3-10 together and
-# produces the first real EER numbers (per TEAM_SYNC_LOG, nothing is reportable
-# before this runs).
+# End-to-end training + validation-based model selection. Produces the first real
+# EER numbers (per TEAM_SYNC_LOG, nothing is reportable before this runs).
 #
-# Intended sequence:
-#
-#   1.  assert_split_integrity()               — refuse to run on a corrupted split
-#   2.  verify_frontend_frozen()               — assert 0 trainable frontend params
-#   3.  load_frozen_split_sets() / build_label_lookup()
-#   4.  stream_and_filter_by_ids(..., need_audio=True)   — the ~20+ min pass
-#   5.  build_feature_cache() + save_feature_cache() per split
-#         (reuse load_feature_cache() on rerun — do not re-stream)
-#   6.  train_model()                          — checkpoints each epoch
-#   7.  load best checkpoint, fit TemperatureScaler on VALIDATION logits only
-#   8.  final test-set pass: EER, ECE, per-language breakdown
-#   9.  rerun data_pipeline/leakage_audit.py once degraded audio exists
-#  10.  write results + update docs/TEAM_SYNC_LOG.md
+# The test split is deliberately NOT touched here. Step 6 is training plus
+# validation-based selection; the test pass is a separate, later step so the test
+# set stays untouched while hyperparameters are still moving.
 #
 # Scope this cycle: 1 seed (SEED = 42), reduced robustness matrix, no ONNX
 # quantization.
 
 
-def run_step6_training(config: Optional[TrainConfig] = None) -> Dict[str, Any]:
-    """PLACEHOLDER — full Step 6 training run. See the sequence above."""
-    raise NotImplementedError(
-        "Step 6 full training run is not wired up yet."
+def run_step6_training(
+    config: Optional[TrainConfig] = None,
+    cache_dir: str = FEATURE_CACHE_DIR,
+    checkpoint_dir: str = CHECKPOINT_DIR,
+    shard_size: int = 500,
+    store_dtype: torch.dtype = torch.float16,
+    train_in_memory: bool = False,
+    window_shards: int = 4,
+    max_clips_per_split: Optional[int] = None,
+    skip_extraction: bool = False,
+) -> Dict[str, Any]:
+    """
+    Full Step 6 run: guards -> feature cache -> train -> calibrate.
+
+    Stages:
+        1. assert_split_integrity()   — refuse to run on a corrupted split
+        2. verify_frontend_frozen()   — assert 0 trainable frontend params
+        3. load frozen split + label lookup
+        4. build_feature_caches_streaming() for train + validation in ONE pass
+           (skipped if already complete, or if skip_extraction=True)
+        5. train_model() over the sharded cache, checkpointing every epoch
+        6. fit TemperatureScaler on VALIDATION logits only, report EER + ECE
+
+    Args:
+        train_in_memory: load the whole train cache into RAM. Faster, but needs
+            ~8-25 GB depending on clip length and store_dtype — see the MEMORY
+            note in Section 6. Default False uses the shard-backed dataset.
+        max_clips_per_split: cap per split. Use a small value (e.g. 200) for a
+            cheap end-to-end rehearsal before committing to the full ~28k clips.
+        skip_extraction: reuse an existing complete cache and go straight to
+            training.
+
+    Returns a summary dict; also leaves checkpoints in checkpoint_dir.
+    """
+    config = config or TrainConfig()
+    set_seed(config.seed)
+
+    print("=" * 60)
+    print("STEP 6 — FULL TRAINING RUN")
+    print("=" * 60)
+
+    # --- 1-2. guards --------------------------------------------------------
+    print("\n[1/6] Verifying frozen split integrity...")
+    assert_split_integrity()
+    print("  split OK — 31,102 clips, no duplicates, no cross-split overlap.")
+
+    print("\n[2/6] Verifying frontend is frozen...")
+    n_trainable = verify_frontend_frozen()
+    print(f"  frontend trainable params: {n_trainable}")
+
+    # --- 3. split + labels --------------------------------------------------
+    print("\n[3/6] Loading frozen split and verified metadata...")
+    train_ids, val_ids, _test_ids = load_frozen_split_sets()
+    label_lookup, language_lookup = build_label_lookup()
+    print(f"  train {len(train_ids):,} | validation {len(val_ids):,}")
+    print("  test split intentionally untouched in Step 6.")
+
+    # --- 4. feature cache ---------------------------------------------------
+    targets = {"train": set(train_ids), "validation": set(val_ids)}
+
+    if skip_extraction:
+        print("\n[4/6] skip_extraction=True — reusing existing cache.")
+        manifests = {
+            name: read_manifest(name, cache_dir) or {}
+            for name in targets
+        }
+        for name, man in manifests.items():
+            if not man or not man.get("complete"):
+                raise ValueError(
+                    f"skip_extraction=True but the '{name}' cache is missing or "
+                    "incomplete. Run without skip_extraction first."
+                )
+    else:
+        print("\n[4/6] Building feature cache (single streaming pass)...")
+        manifests = build_feature_caches_streaming(
+            targets=targets,
+            label_lookup=label_lookup,
+            cache_dir=cache_dir,
+            shard_size=shard_size,
+            store_dtype=store_dtype,
+            resume=True,
+            max_clips_per_split=max_clips_per_split,
+        )
+
+    for name, man in manifests.items():
+        if not man.get("complete"):
+            raise RuntimeError(
+                f"Feature cache for '{name}' is incomplete. Re-run to resume "
+                "(resume=True skips clips already extracted)."
+            )
+
+        # A rehearsal cache is internally complete but is not the full split.
+        # Without this guard, `skip_extraction=True` after a capped rehearsal
+        # would train on a few hundred clips and report the EER as if it were real.
+        cap = man.get("capped")
+        if cap is not None and max_clips_per_split is None:
+            raise RuntimeError(
+                f"The '{name}' cache was built with max_clips_per_split={cap} "
+                f"({man['num_clips']:,} clips) — it is a rehearsal cache, not the "
+                f"full split ({len(targets[name]):,} clips). Delete {cache_dir} and "
+                "rebuild, or pass the same max_clips_per_split to acknowledge it."
+            )
+        if cap is not None:
+            print(
+                f"  [{name}] REHEARSAL CACHE — {man['num_clips']:,} clips "
+                f"(cap {cap}). Results are not reportable."
+            )
+
+    # --- 5. training --------------------------------------------------------
+    print("\n[5/6] Preparing datasets...")
+
+    # Validation is small enough to hold in RAM, and doing so avoids reloading
+    # shards on every epoch's validation pass.
+    val_data = load_sharded_cache_into_memory("validation", cache_dir)
+    print(f"  validation: {len(val_data):,} clips in memory")
+
+    train_sampler = None
+    if train_in_memory:
+        train_data = load_sharded_cache_into_memory("train", cache_dir)
+        print(f"  train: {len(train_data):,} clips in memory")
+    else:
+        train_data = ShardedFeatureDataset(
+            "train",
+            cache_dir=cache_dir,
+            max_cached_shards=max(window_shards, 2),
+        )
+        train_sampler = ShardBlockShuffleSampler(
+            train_data, window_shards=window_shards, seed=config.seed
+        )
+        print(
+            f"  train: {len(train_data):,} clips across "
+            f"{len(train_data.shards)} shards (shard-backed), "
+            f"shuffle window {window_shards * shard_size:,} clips"
+        )
+
+    print("\n[5/6] Training...")
+    model, train_summary = train_model(
+        train_features=train_data,
+        val_features=val_data,
+        config=config,
+        checkpoint_dir=checkpoint_dir,
+        validate=True,
+        train_sampler=train_sampler,
     )
+
+    # --- 6. calibration on validation only -----------------------------------
+    print("\n[6/6] Calibrating on validation logits...")
+
+    best_path = train_summary.get("best_path")
+    if best_path and os.path.exists(best_path):
+        ckpt = load_checkpoint(best_path, model=model)
+        print(f"  loaded best checkpoint from epoch {ckpt['epoch']}")
+
+    val_loader = make_dataloader(val_data, config.batch_size, shuffle=False)
+    val_logits, val_labels = collect_logits(model, val_loader)
+
+    uncalibrated_eer, threshold = eer_from_logits_and_labels(val_logits, val_labels)
+
+    scaler = TemperatureScaler().to(DEVICE)
+    temperature = scaler.fit(
+        torch.from_numpy(val_logits).float().to(DEVICE),
+        torch.from_numpy(val_labels).float().to(DEVICE),
+    )
+
+    with torch.no_grad():
+        calibrated_logits = (
+            scaler(torch.from_numpy(val_logits).float().to(DEVICE)).cpu().numpy()
+        )
+
+    # ECE is computed on P(fake), matching the training target (1 = fake).
+    probs_raw = 1.0 / (1.0 + np.exp(-val_logits))
+    probs_cal = 1.0 / (1.0 + np.exp(-calibrated_logits))
+    ece_raw, _ = compute_ece(probs_raw, val_labels)
+    ece_cal, _ = compute_ece(probs_cal, val_labels)
+
+    # Temperature scaling is monotonic, so EER is unchanged by construction —
+    # recomputed here only as a guard against a sign/orientation regression.
+    calibrated_eer, _ = eer_from_logits_and_labels(calibrated_logits, val_labels)
+
+    print(f"  validation EER      : {uncalibrated_eer * 100:.2f}%")
+    print(f"  temperature         : {temperature:.4f}")
+    print(f"  ECE before          : {ece_raw:.4f}")
+    print(f"  ECE after           : {ece_cal:.4f}")
+    print(f"  EER after scaling   : {calibrated_eer * 100:.2f}% (should be unchanged)")
+
+    summary = {
+        "config": config.__dict__,
+        "num_train": len(train_data),
+        "num_val": len(val_data),
+        "loss_history": train_summary["loss_history"],
+        "best_val_eer": train_summary["best_eer"],
+        "best_checkpoint": train_summary["best_path"],
+        "val_eer": float(uncalibrated_eer),
+        "val_eer_threshold": float(threshold),
+        "temperature": float(temperature),
+        "ece_before": float(ece_raw),
+        "ece_after": float(ece_cal),
+    }
+
+    results_path = os.path.join(checkpoint_dir, "step6_summary.json")
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    with open(results_path, "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2)
+    print(f"\nSummary written to {results_path}")
+    print("Remember to record the EER in docs/TEAM_SYNC_LOG.md.")
+
+    return summary
 
 
 if __name__ == "__main__":
     raise SystemExit(
         "model_pipeline.py is a library module. "
-        "Step 6 (run_step6_training) is not implemented yet."
+        "Run Step 6 from Colab: "
+        "`from model_pipeline import run_step6_training; run_step6_training()`"
     )
