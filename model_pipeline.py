@@ -420,6 +420,123 @@ def extract_features(
     return hidden_states.cpu()
 
 
+def frontend_uses_attention_mask() -> bool:
+    """
+    Whether this frontend's feature extractor returns an attention mask.
+
+    Decisive for batching. XLS-R (a wav2vec2-large variant) returns one; the
+    wav2vec2-base checkpoints do not. Without a mask, a padded batch is NOT
+    numerically equivalent to single-item extraction — padding leaks into both
+    the per-utterance normalization and the self-attention — so batching is
+    unsafe and must be refused rather than silently approximated.
+    """
+    feature_extractor, _ = load_frontend()
+    return bool(getattr(feature_extractor, "return_attention_mask", False))
+
+
+def extract_features_batch(
+    audio_arrays: Sequence[np.ndarray],
+    sampling_rates: Optional[Sequence[int]] = None,
+    device: Optional[str] = None,
+) -> List[torch.Tensor]:
+    """
+    Batched frozen-frontend extraction. Returns one (seq_len_i, 1024) CPU tensor
+    per input, each trimmed to its own true length.
+
+    Numerically equivalent to calling extract_features() per clip, not an
+    approximation of it, because:
+
+      * the feature extractor pads and returns an attention_mask, and applies its
+        zero-mean/unit-variance normalization per sequence over the unpadded
+        length (not over the padded tensor);
+      * the mask is passed to the model, so padded frames are excluded from
+        self-attention;
+      * each output is sliced back to its own frame count via the model's
+        conv-stack length formula, so no padded frame is ever stored.
+
+    Falls back to per-clip extraction if the feature extractor has no attention
+    mask — correctness first.
+    """
+    device = device or DEVICE
+    feature_extractor, frontend = load_frontend(device=device)
+
+    if sampling_rates is None:
+        sampling_rates = [TARGET_SAMPLE_RATE] * len(audio_arrays)
+
+    arrays = [
+        ensure_target_sample_rate(a, sr)
+        for a, sr in zip(audio_arrays, sampling_rates)
+    ]
+
+    if len(arrays) == 1:
+        return [extract_features(arrays[0], TARGET_SAMPLE_RATE, device)]
+
+    if not frontend_uses_attention_mask():
+        # Padding would change the result; extract one at a time instead.
+        return [extract_features(a, TARGET_SAMPLE_RATE, device) for a in arrays]
+
+    inputs = feature_extractor(
+        arrays,
+        sampling_rate=TARGET_SAMPLE_RATE,
+        return_tensors="pt",
+        padding=True,
+    )
+    input_values = inputs.input_values.to(device)
+    attention_mask = inputs.get("attention_mask")
+    if attention_mask is None:
+        return [extract_features(a, TARGET_SAMPLE_RATE, device) for a in arrays]
+    attention_mask = attention_mask.to(device)
+
+    with torch.no_grad():
+        outputs = frontend(input_values, attention_mask=attention_mask)
+
+    hidden = outputs.last_hidden_state  # (batch, padded_frames, 1024)
+
+    # True per-item frame counts after the conv stack's downsampling.
+    out_lens = frontend._get_feat_extract_output_lengths(attention_mask.sum(-1))
+    out_lens = [int(x) for x in out_lens]
+
+    return [hidden[i, : out_lens[i]].cpu() for i in range(len(arrays))]
+
+
+def _plan_batches(
+    lengths: Sequence[int],
+    max_items: int,
+    max_padded_samples: int,
+) -> List[List[int]]:
+    """
+    Group indices into length-sorted batches bounded by both item count and
+    padded-sample budget.
+
+    Sorting by length keeps padding waste low. The sample budget stops one long
+    clip from turning a full batch into a multi-GB attention tensor — attention is
+    quadratic in sequence length, so a 30s clip batched with 15 others is exactly
+    how this OOMs.
+    """
+    order = sorted(range(len(lengths)), key=lambda i: lengths[i])
+
+    batches: List[List[int]] = []
+    current: List[int] = []
+    current_max = 0
+
+    for idx in order:
+        candidate_max = max(current_max, lengths[idx])
+        if current and (
+            len(current) + 1 > max_items
+            or (len(current) + 1) * candidate_max > max_padded_samples
+        ):
+            batches.append(current)
+            current, current_max = [idx], lengths[idx]
+        else:
+            current.append(idx)
+            current_max = candidate_max
+
+    if current:
+        batches.append(current)
+
+    return batches
+
+
 # ============================================================================
 # SECTION 6 — Feature cache
 # ============================================================================
@@ -564,6 +681,12 @@ def build_feature_caches_streaming(
     resume: bool = True,
     progress_every: int = 100,
     max_clips_per_split: Optional[int] = None,
+    extract_batch_size: int = 8,
+    batch_sort_factor: int = 4,
+    # 120 s of padded audio per forward pass. Self-attention is quadratic in
+    # sequence length, so this is what stops 8 x 30 s clips (T=1500 padded frames,
+    # ~1 GB of transient attention per layer) from landing in one batch.
+    max_batch_samples: int = 120 * TARGET_SAMPLE_RATE,
 ) -> Dict[str, Dict[str, Any]]:
     """
     Single-pass, memory-bounded feature cache builder.
@@ -573,12 +696,17 @@ def build_feature_caches_streaming(
     full pass costs ~20+ minutes and there is no random access to amortise it.
 
     Per matching example:
-        decode audio -> extract features -> cast to store_dtype -> append tuple
-        -> drop the waveform and the decoder reference immediately.
+        decode audio -> hold in a small pending buffer -> extract in batches
+        -> cast to store_dtype -> append tuple -> drop the waveforms.
 
-    Only one clip's raw audio is ever resident, and only one shard's worth of
-    features. Peak RAM is therefore roughly shard_size * per-clip feature size,
-    independent of how many clips the split holds.
+    Peak RAM is one shard of features plus at most
+    extract_batch_size * batch_sort_factor raw waveforms (tens of MB), regardless
+    of how many clips the split holds.
+
+    Batching matters: the frozen frontend is a 300M-parameter model, and a
+    single-clip forward pass leaves the GPU almost entirely idle. Because it is
+    frozen and in eval mode, batching computes exactly the same features — see
+    extract_features_batch for why padding does not contaminate the result.
 
     Args:
         targets: {split_name: set_of_clip_ids}. Splits are disjoint (guaranteed by
@@ -587,6 +715,11 @@ def build_feature_caches_streaming(
             note in the module docs — the smoke test ran fp32.
         resume: skip clip IDs already present in a previous run's shards.
         max_clips_per_split: cap per split, for a cheap end-to-end rehearsal.
+        extract_batch_size: clips per frontend forward pass.
+        batch_sort_factor: how many batches to buffer before length-sorting them.
+            Higher means less padding waste and more raw audio held at once.
+        max_batch_samples: padded-sample budget per forward pass. Attention is
+            quadratic in length, so this caps the cost of a long outlier clip.
 
     Returns:
         {split_name: manifest_dict}
@@ -643,8 +776,14 @@ def build_feature_caches_streaming(
     counts: Dict[str, int] = {n: len(done_ids[n]) for n in targets}
     bytes_written: Dict[str, int] = {n: 0 for n in targets}
 
-    def flush(name: str, final: bool = False) -> None:
-        """Write one shard and free it. The only place features leave RAM."""
+    def flush(name: str, final: bool = False, limit: Optional[int] = None) -> None:
+        """
+        Write one shard and free it. The only place features leave RAM.
+
+        `limit` writes exactly that many clips and keeps the remainder buffered —
+        batched extraction can overshoot shard_size, and shards must stay evenly
+        sized for the sampler's shuffle window to mean what it says.
+        """
         if not buffers[name]:
             if final:
                 write_manifest(
@@ -653,17 +792,21 @@ def build_feature_caches_streaming(
                 )
             return
 
+        take = len(buffers[name]) if limit is None else min(limit, len(buffers[name]))
+        payload = buffers[name][:take]
+        payload_ids = buffer_ids[name][:take]
+
         idx = len(shards[name])
         path = shard_path(name, idx, cache_dir)
-        torch.save(buffers[name], path)
+        torch.save(payload, path)
 
         size = os.path.getsize(path)
         bytes_written[name] += size
         shards[name].append({
             "file": os.path.basename(path),
-            "count": len(buffers[name]),
+            "count": len(payload),
             "bytes": size,
-            "clip_ids": list(buffer_ids[name]),
+            "clip_ids": list(payload_ids),
         })
 
         # Manifest is rewritten here so a crash mid-run leaves a consistent,
@@ -673,21 +816,83 @@ def build_feature_caches_streaming(
             capped=max_clips_per_split,
         )
 
-        buffers[name].clear()
-        buffer_ids[name].clear()
+        del buffers[name][:take]
+        del buffer_ids[name][:take]
+
+    # Timing breakdown. The whole point is to separate the FIXED cost of scanning
+    # the stream (network + parquet decode, paid once regardless of how many clips
+    # match) from the PER-CLIP cost of decode + GPU extraction. Only the latter
+    # scales with target count, so the two must not be averaged together.
+    timings = {"stream": 0.0, "decode": 0.0, "extract": 0.0, "save": 0.0}
+
+    # Raw audio waiting to be extracted as a batch.
+    pending: List[Tuple[str, str, np.ndarray]] = []
+
+    def run_pending() -> None:
+        """Extract all pending clips in length-sorted, budget-bounded batches."""
+        if not pending:
+            return
+
+        t0 = time.time()
+        lengths = [len(w) for _, _, w in pending]
+        for group in _plan_batches(lengths, extract_batch_size, max_batch_samples):
+            feats_list = extract_features_batch(
+                [pending[i][2] for i in group],
+                [TARGET_SAMPLE_RATE] * len(group),
+                device=device,
+            )
+            for i, feats in zip(group, feats_list):
+                split_name, clip_id, _ = pending[i]
+                buffers[split_name].append(
+                    (feats.to(store_dtype), label_lookup[clip_id])
+                )
+                buffer_ids[split_name].append(clip_id)
+        timings["extract"] += time.time() - t0
+
+        pending.clear()
+
+        for name in targets:
+            while len(buffers[name]) >= shard_size:
+                t1 = time.time()
+                flush(name, limit=shard_size)
+                timings["save"] += time.time() - t1
 
     started = time.time()
     scanned = 0
     matched = 0
-    ds = open_stream(need_audio=True)
 
+    print(f"Device: {DEVICE}")
+    if DEVICE == "cpu":
+        print(
+            "  WARNING: no GPU detected. The frozen frontend forward pass is "
+            "roughly 20x slower on CPU and will dominate the run. Check the Colab "
+            "runtime type before committing to a full extraction."
+        )
+    print(
+        f"Batching: up to {extract_batch_size} clips/forward "
+        f"(sorted by length, {max_batch_samples:,} padded-sample budget)"
+    )
     print(
         "Streaming pass: "
         + ", ".join(f"{n} {len(remaining[n]):,} to extract" for n in targets)
     )
 
+    t_stream = time.time()
+    ds = open_stream(need_audio=True)
+    iterator = iter(ds)
+    timings["stream"] += time.time() - t_stream
+
     try:
-        for ex in ds:
+        while True:
+            # Timed separately: this is where network I/O and parquet decoding land.
+            t_stream = time.time()
+            try:
+                ex = next(iterator)
+            except StopIteration:
+                break
+            finally:
+                timings["stream"] += time.time() - t_stream
+
             scanned += 1
 
             clip_id = ex["id"]
@@ -710,20 +915,20 @@ def build_feature_caches_streaming(
             if clip_id not in label_lookup:
                 raise KeyError(f"Clip {clip_id} is not in the verified metadata.")
 
-            # Decode -> extract -> discard. `waveform` is the only raw audio alive,
-            # and it goes out of scope on the next iteration.
+            t_decode = time.time()
             waveform, sr = decode_audio(ex)
-            feats = extract_features(waveform, sampling_rate=sr, device=device)
+            waveform = ensure_target_sample_rate(waveform, sr)
+            timings["decode"] += time.time() - t_decode
+
+            pending.append((split_name, clip_id, waveform))
             del waveform
 
-            buffers[split_name].append((feats.to(store_dtype), label_lookup[clip_id]))
-            buffer_ids[split_name].append(clip_id)
             remaining[split_name].discard(clip_id)
             counts[split_name] += 1
             matched += 1
 
-            if len(buffers[split_name]) >= shard_size:
-                flush(split_name)
+            if len(pending) >= extract_batch_size * batch_sort_factor:
+                run_pending()
 
             if progress_every and matched % progress_every == 0:
                 elapsed = time.time() - started
@@ -745,10 +950,15 @@ def build_feature_caches_streaming(
                 break
 
     finally:
-        # Runs on success, on KeyboardInterrupt, and on exception, so a partial
-        # buffer is never silently lost.
-        for name in targets:
-            flush(name, final=not remaining[name])
+        # Runs on success, on KeyboardInterrupt, and on exception, so neither a
+        # pending batch nor a partial buffer is silently lost.
+        try:
+            run_pending()
+        finally:
+            for name in targets:
+                while len(buffers[name]) > shard_size:
+                    flush(name, limit=shard_size)
+                flush(name, final=not remaining[name])
 
     elapsed = time.time() - started
     print(
@@ -769,7 +979,70 @@ def build_feature_caches_streaming(
                 "Re-run with resume=True to retry them."
             )
 
+    _report_timings(timings, elapsed, scanned, matched, targets)
+
     return {name: read_manifest(name, cache_dir) or {} for name in targets}
+
+
+def _report_timings(
+    timings: Dict[str, float],
+    elapsed: float,
+    scanned: int,
+    matched: int,
+    targets: Dict[str, set],
+) -> None:
+    """
+    Print where the time actually went, and project the full run from it.
+
+    The projection is the reason this exists. Dividing total elapsed time by
+    matched clips conflates two very different costs and badly overestimates the
+    full run whenever the scan dominates: scanning the stream is paid once no
+    matter how many clips you keep, while decode+extract is paid per kept clip.
+    """
+    accounted = sum(timings.values())
+    other = max(elapsed - accounted, 0.0)
+
+    print("\n--- TIMING BREAKDOWN ---")
+    rows = [
+        ("stream i/o (network + parquet)", timings["stream"]),
+        ("audio decode", timings["decode"]),
+        ("frontend extraction (GPU)", timings["extract"]),
+        ("shard writes", timings["save"]),
+        ("other (matching, bookkeeping)", other),
+    ]
+    for label, value in rows:
+        share = value / elapsed * 100 if elapsed else 0.0
+        print(f"  {label:<32} {_format_duration(value):>9}  {share:5.1f}%")
+
+    if not scanned or not matched:
+        return
+
+    per_scanned = timings["stream"] / scanned
+    per_matched = (timings["decode"] + timings["extract"]) / matched
+
+    print("\n--- UNIT COSTS ---")
+    print(f"  fixed:    {per_scanned * 1000:7.1f} ms per streamed example (scan)")
+    print(f"  variable: {per_matched * 1000:7.1f} ms per extracted clip (decode+GPU)")
+
+    full_targets = sum(len(v) for v in targets.values())
+    projected = EXPECTED_TOTAL_CLIPS * per_scanned + full_targets * per_matched
+
+    print("\n--- FULL-RUN PROJECTION ---")
+    print(
+        f"  scan {EXPECTED_TOTAL_CLIPS:,} examples : "
+        f"{_format_duration(EXPECTED_TOTAL_CLIPS * per_scanned)}"
+    )
+    print(
+        f"  extract {full_targets:,} clips    : "
+        f"{_format_duration(full_targets * per_matched)}"
+    )
+    print(f"  projected total          : {_format_duration(projected)}")
+
+    naive = elapsed / matched * full_targets
+    print(
+        f"  (naive elapsed/matched extrapolation would say "
+        f"{_format_duration(naive)} — it double-counts the fixed scan)"
+    )
 
 
 class ShardedFeatureDataset(Dataset):
@@ -1567,6 +1840,7 @@ def run_step6_training(
     window_shards: int = 4,
     max_clips_per_split: Optional[int] = None,
     skip_extraction: bool = False,
+    extract_batch_size: int = 8,
 ) -> Dict[str, Any]:
     """
     Full Step 6 run: guards -> feature cache -> train -> calibrate.
@@ -1639,6 +1913,7 @@ def run_step6_training(
             store_dtype=store_dtype,
             resume=True,
             max_clips_per_split=max_clips_per_split,
+            extract_batch_size=extract_batch_size,
         )
 
     for name, man in manifests.items():
