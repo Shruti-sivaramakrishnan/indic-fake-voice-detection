@@ -1833,6 +1833,8 @@ def save_checkpoint(
     path: str,
     metrics: Optional[Dict[str, float]] = None,
     config: Optional[TrainConfig] = None,
+    best_eer: Optional[float] = None,
+    history: Optional[List[Dict[str, float]]] = None,
 ) -> str:
     """
     Head weights only — the frontend is frozen and reloaded from HF by name.
@@ -1861,8 +1863,19 @@ def save_checkpoint(
     if config is not None:
         payload["config"] = config.__dict__
         payload["frontend_model_name"] = FRONTEND_MODEL_NAME
+    if best_eer is not None:
+        # Required for correct resume. Without it a resumed run restarts
+        # best-tracking at infinity and overwrites best_model.pt with the first
+        # epoch it sees, even when that epoch is worse than the pre-crash best.
+        payload["best_eer"] = best_eer
+    if history is not None:
+        payload["history"] = history
 
-    torch.save(payload, path)
+    # Write to a temp file and rename, so a disconnect mid-write cannot leave a
+    # truncated checkpoint where a valid one used to be.
+    tmp = path + ".tmp"
+    torch.save(payload, tmp)
+    os.replace(tmp, path)
     return path
 
 
@@ -1902,6 +1915,7 @@ def train_model(
     checkpoint_dir: str = CHECKPOINT_DIR,
     validate: bool = True,
     train_sampler: Optional[Sampler] = None,
+    resume: bool = True,
 ) -> Tuple[AASISTHead, Dict[str, Any]]:
     """
     Train the head on cached frozen features.
@@ -1944,7 +1958,61 @@ def train_model(
     best_path = os.path.join(checkpoint_dir, "best_model.pt")
     last_path = os.path.join(checkpoint_dir, "last_model.pt")
 
-    for epoch in range(1, config.num_epochs + 1):
+    # --- resume from the last completed epoch -------------------------------
+    start_epoch = 1
+    if resume and os.path.exists(last_path):
+        ckpt = load_checkpoint(last_path, model=model, optimizer=optimizer)
+
+        stored = ckpt.get("config") or {}
+        for key in ("hidden_dim", "num_gat_layers", "dropout"):
+            if key in stored and stored[key] != getattr(config, key):
+                raise ValueError(
+                    f"Checkpoint {last_path} was trained with {key}="
+                    f"{stored[key]}, but this run uses {getattr(config, key)}. "
+                    "Resuming would mix two different models. Delete the "
+                    "checkpoint to start fresh, or pass a matching TrainConfig."
+                )
+
+        completed = int(ckpt["epoch"])
+        start_epoch = completed + 1
+        loss_history = list(ckpt.get("loss_history", []))
+        history = list(ckpt.get("history", []))
+        best_eer = float(ckpt.get("best_eer", float("inf")))
+
+        if len(loss_history) != completed:
+            print(
+                f"  WARNING: checkpoint says epoch {completed} but carries "
+                f"{len(loss_history)} loss entries; trusting the epoch number."
+            )
+
+        print(
+            f"Resuming from {last_path}: {completed} epoch(s) done, "
+            f"continuing at epoch {start_epoch}/{config.num_epochs}"
+            + (
+                f", best val EER so far {best_eer * 100:.2f}%"
+                if best_eer != float("inf") else ", no best recorded yet"
+            )
+        )
+        # Note: RNG state is not restored, so a resumed run is not bit-identical
+        # to an uninterrupted one. Per-epoch shuffling stays deterministic
+        # because the sampler is seeded by epoch number, not by stream position.
+
+        if start_epoch > config.num_epochs:
+            print(
+                f"Training already complete ({completed}/{config.num_epochs} "
+                "epochs). Nothing to do."
+            )
+            return model, {
+                "history": history,
+                "loss_history": loss_history,
+                "best_eer": best_eer if best_eer != float("inf") else None,
+                "best_path": best_path if os.path.exists(best_path) else None,
+                "last_path": last_path,
+                "resumed": True,
+                "epochs_run": 0,
+            }
+
+    for epoch in range(start_epoch, config.num_epochs + 1):
         # Without this the shard-block sampler replays one fixed order every epoch.
         if train_sampler is not None and hasattr(train_sampler, "set_epoch"):
             train_sampler.set_epoch(epoch)
@@ -1970,9 +2038,13 @@ def train_model(
         history.append(record)
         print(line)
 
+        # Written every epoch, improvement or not, so a disconnect costs at most
+        # one epoch. best_eer rides along so a resume does not lose best-tracking.
         save_checkpoint(
             model, optimizer, epoch, loss_history, last_path,
             metrics=val_metrics, config=config,
+            best_eer=best_eer if best_eer != float("inf") else None,
+            history=history,
         )
 
         if val_metrics is not None and val_metrics["eer"] < best_eer:
@@ -1980,6 +2052,14 @@ def train_model(
             save_checkpoint(
                 model, optimizer, epoch, loss_history, best_path,
                 metrics=val_metrics, config=config,
+                best_eer=best_eer, history=history,
+            )
+            # Re-write last_model.pt so its best_eer matches; otherwise a resume
+            # right after a new best would forget that this epoch was the best.
+            save_checkpoint(
+                model, optimizer, epoch, loss_history, last_path,
+                metrics=val_metrics, config=config,
+                best_eer=best_eer, history=history,
             )
             print(f"  new best val EER {best_eer * 100:.2f}% -> {best_path}")
 
@@ -1992,6 +2072,8 @@ def train_model(
         "best_eer": best_eer if val_loader is not None else None,
         "best_path": best_path if val_loader is not None else None,
         "last_path": last_path,
+        "resumed": start_epoch > 1,
+        "epochs_run": config.num_epochs - start_epoch + 1,
     }
 
 
@@ -2298,6 +2380,7 @@ def run_step6_training(
         "num_train": len(train_data),
         "num_val": len(val_data),
         "loss_history": train_summary["loss_history"],
+        "history": train_summary["history"],
         "best_val_eer": train_summary["best_eer"],
         "best_checkpoint": train_summary["best_path"],
         "val_eer": float(uncalibrated_eer),
@@ -2317,9 +2400,411 @@ def run_step6_training(
     return summary
 
 
+# ============================================================================
+# SECTION 13 — Resilient Colab entry point
+# ============================================================================
+# Everything below exists so that ONE cell, re-run after ANY disconnect at ANY
+# point, does the right thing: skip what is done, resume what is partial,
+# continue. Correctness and idempotency over elegance.
+#
+# The single most important part is that state lives on Google Drive. Colab's
+# local disk is wiped on disconnect, so a feature cache or checkpoint under
+# /content is gone exactly when resume matters most.
+
+DRIVE_MOUNT_POINT = "/content/drive"
+DEFAULT_DRIVE_WORKDIR = "/content/drive/MyDrive/indic-fake-voice-detection"
+REPO_URL = "https://github.com/Shruti-sivaramakrishnan/indic-fake-voice-detection.git"
+DEFAULT_REPO_DIR = "/content/indic-fake-voice-detection"
+
+
+def in_colab() -> bool:
+    try:
+        import google.colab  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def ensure_drive_mounted(mount_point: str = DRIVE_MOUNT_POINT) -> bool:
+    """
+    Mount Google Drive, idempotently. Returns True if usable.
+
+    Never assumes an existing mount: a stale /content/drive directory can survive
+    a disconnect while the mount itself is dead.
+    """
+    if not in_colab():
+        print("Not running in Colab — skipping Drive mount.")
+        return False
+
+    my_drive = os.path.join(mount_point, "MyDrive")
+    if os.path.isdir(my_drive) and os.access(my_drive, os.W_OK):
+        print(f"Drive already mounted at {mount_point}")
+        return True
+
+    from google.colab import drive  # type: ignore
+
+    for attempt in (1, 2):
+        try:
+            print(f"Mounting Google Drive (attempt {attempt})...")
+            drive.mount(mount_point, force_remount=(attempt > 1))
+            if os.path.isdir(my_drive):
+                print(f"Drive mounted at {mount_point}")
+                return True
+        except Exception as exc:  # noqa: BLE001
+            print(f"  mount attempt {attempt} failed: {type(exc).__name__}: {exc}")
+
+    print(
+        "\n" + "!" * 60
+        + "\nCOULD NOT MOUNT GOOGLE DRIVE."
+        + "\nAuthorize the mount popup and re-run this cell. Without Drive, the"
+        + "\nfeature cache and checkpoints live on Colab's local disk and are"
+        + "\nERASED on the next disconnect.\n"
+        + "!" * 60 + "\n"
+    )
+    return False
+
+
+def ensure_repo(
+    repo_dir: str = DEFAULT_REPO_DIR,
+    repo_url: str = REPO_URL,
+    branch: str = "claude/ml-repo-structure-review-fpox8u",
+) -> str:
+    """Clone the repo if absent, otherwise fast-forward it. Idempotent."""
+    import subprocess
+
+    marker = os.path.join(repo_dir, "model_pipeline.py")
+
+    if os.path.exists(marker):
+        print(f"Repo present at {repo_dir} — pulling latest...")
+        subprocess.run(
+            ["git", "-C", repo_dir, "pull", "--ff-only", "origin", branch],
+            check=False,
+        )
+        return repo_dir
+
+    print(f"Cloning {repo_url} ({branch}) -> {repo_dir}")
+    subprocess.run(
+        ["git", "clone", "--branch", branch, repo_url, repo_dir], check=True
+    )
+    return repo_dir
+
+
+def _fmt_age(path: str) -> str:
+    if not os.path.exists(path):
+        return "missing"
+    age = time.time() - os.path.getmtime(path)
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(os.path.getmtime(path)))
+    return f"{stamp} ({_format_duration(age)} ago)"
+
+
+def print_status_report(
+    cache_dir: str = FEATURE_CACHE_DIR,
+    checkpoint_dir: str = CHECKPOINT_DIR,
+    config: Optional[TrainConfig] = None,
+) -> Dict[str, Any]:
+    """
+    One glance at where the run stands. Reads only on-disk state, so it is
+    accurate regardless of what this Python session has or has not done.
+    """
+    config = config or TrainConfig()
+
+    print("=" * 64)
+    print("STEP 6 STATUS")
+    print("=" * 64)
+    print(f"cache dir      : {cache_dir}")
+    print(f"checkpoint dir : {checkpoint_dir}")
+
+    status: Dict[str, Any] = {"cache": {}, "training": {}}
+
+    print("\nFEATURE CACHE")
+    try:
+        train_ids, val_ids, _ = load_frozen_split_sets()
+        expected = {"train": len(train_ids), "validation": len(val_ids)}
+    except Exception:  # noqa: BLE001
+        expected = {}
+
+    for name in ("train", "validation"):
+        man = read_manifest(name, cache_dir)
+        exp = man.get("expected_clips") if man else None
+        exp = exp or expected.get(name)
+        if not man:
+            print(f"  {name:<11}: not started" + (f" (0 / {exp:,})" if exp else ""))
+            status["cache"][name] = {"pct": 0.0, "complete": False, "clips": 0}
+            continue
+
+        clips = man["num_clips"]
+        failed = man.get("num_failed", 0)
+        pct = (clips + failed) / exp * 100 if exp else 0.0
+        flag = "COMPLETE" if man.get("complete") else "partial"
+        cap = man.get("capped")
+        print(
+            f"  {name:<11}: {clips:,} cached"
+            + (f", {failed:,} failed" if failed else "")
+            + (f" / {exp:,} expected" if exp else "")
+            + f"  ->  {pct:5.1f}% {flag}"
+            + (f"  [REHEARSAL cap={cap}]" if cap else "")
+        )
+        status["cache"][name] = {
+            "pct": pct, "complete": bool(man.get("complete")), "clips": clips,
+            "failed": failed, "capped": cap,
+        }
+
+    failures = read_failed_clips(cache_dir)
+    if failures:
+        print(f"  failure log: {len(failures)} event(s) — {failed_clips_path(cache_dir)}")
+
+    print("\nTRAINING")
+    last_path = os.path.join(checkpoint_dir, "last_model.pt")
+    best_path = os.path.join(checkpoint_dir, "best_model.pt")
+
+    if not os.path.exists(last_path):
+        print(f"  no checkpoint — training has not started (0 / {config.num_epochs})")
+        status["training"] = {"epochs_done": 0, "complete": False}
+    else:
+        try:
+            ckpt = torch.load(last_path, map_location="cpu")
+            done = int(ckpt.get("epoch", 0))
+            best = ckpt.get("best_eer")
+            print(
+                f"  last_model.pt : epoch {done} of {config.num_epochs} completed"
+                f"  [{_fmt_age(last_path)}]"
+            )
+            if best is not None:
+                print(f"  best val EER  : {best * 100:.2f}%  [{_fmt_age(best_path)}]")
+            else:
+                print(f"  best_model.pt : {_fmt_age(best_path)}")
+            lh = ckpt.get("loss_history") or []
+            if lh:
+                print(
+                    f"  loss          : {lh[0]:.4f} -> {lh[-1]:.4f} "
+                    f"over {len(lh)} epoch(s)"
+                )
+            complete = done >= config.num_epochs
+            print(f"  status        : {'COMPLETE' if complete else 'PARTIAL'}")
+            status["training"] = {
+                "epochs_done": done, "complete": complete, "best_eer": best,
+            }
+        except Exception as exc:  # noqa: BLE001
+            print(f"  checkpoint unreadable ({type(exc).__name__}: {exc})")
+            status["training"] = {"epochs_done": 0, "complete": False, "error": str(exc)}
+
+    summary_path = os.path.join(checkpoint_dir, "step6_summary.json")
+    if os.path.exists(summary_path):
+        print(f"\nSUMMARY EXISTS : {summary_path}  [{_fmt_age(summary_path)}]")
+    print("=" * 64 + "\n")
+
+    return status
+
+
+def write_git_ready_summary(
+    summary: Dict[str, Any],
+    repo_dir: str,
+    checkpoint_dir: str,
+) -> str:
+    """
+    Write docs/STEP6_RESULTS.md the moment training + calibration finish, so the
+    next action is a commit and nothing is ambiguous about whether it is done.
+    """
+    docs_dir = os.path.join(repo_dir, "docs")
+    os.makedirs(docs_dir, exist_ok=True)
+    path = os.path.join(docs_dir, "STEP6_RESULTS.md")
+
+    cfg = summary.get("config", {})
+    lh = summary.get("loss_history") or []
+
+    lines = [
+        "# Step 6 Results — Model Pipeline",
+        "",
+        f"_Generated {time.strftime('%Y-%m-%d %H:%M:%S')} by "
+        "`model_pipeline.run_step6_resilient()`._",
+        "",
+        "## Headline",
+        "",
+        f"- **Validation EER: {summary['val_eer'] * 100:.2f}%**",
+        f"- Best checkpoint val EER: "
+        + (
+            f"{summary['best_val_eer'] * 100:.2f}%"
+            if summary.get("best_val_eer") is not None else "n/a"
+        ),
+        f"- ECE before calibration: {summary['ece_before']:.4f}",
+        f"- ECE after calibration: {summary['ece_after']:.4f}",
+        f"- Temperature: {summary['temperature']:.4f}",
+        f"- EER decision threshold: {summary['val_eer_threshold']:.4f}",
+        "",
+        "## Data",
+        "",
+        f"- Train clips: {summary['num_train']:,}",
+        f"- Validation clips: {summary['num_val']:,}",
+        "- Split: frozen `data_pipeline/split_ids.json` (31,102 clips), loaded "
+        "as-is, never regenerated.",
+        "- Test split untouched — Step 6 is training + validation-based selection "
+        "only.",
+        "",
+        "## Configuration",
+        "",
+        "```",
+    ]
+    for key in sorted(cfg):
+        lines.append(f"{key} = {cfg[key]}")
+    lines += [
+        "```",
+        "",
+        f"- Frontend: frozen `{FRONTEND_MODEL_NAME}` (0 trainable parameters)",
+        f"- Seed: {cfg.get('seed', SEED)} (1 seed this cycle — compressed timeline)",
+        "",
+        "## Training curve",
+        "",
+        f"- Epochs completed: {len(lh)}",
+    ]
+    if lh:
+        lines.append(f"- Loss: {lh[0]:.4f} -> {lh[-1]:.4f}")
+        lines.append("")
+        lines.append("| epoch | train loss | val loss | val EER |")
+        lines.append("|---|---|---|---|")
+        for rec in summary.get("history", []):
+            ve = rec.get("val_eer")
+            vl = rec.get("val_loss")
+            lines.append(
+                f"| {rec['epoch']} | {rec['train_loss']:.4f} | "
+                + (f"{vl:.4f}" if vl is not None else "-")
+                + " | "
+                + (f"{ve * 100:.2f}%" if ve is not None else "-")
+                + " |"
+            )
+
+    failures = summary.get("failed_clips", 0)
+    lines += [
+        "",
+        "## Data integrity",
+        "",
+        f"- Clips lost to decode/extract failure: {failures}",
+    ]
+    if failures:
+        lines.append(
+            "- See `feature_cache/failed_clips.json`. Cached + failed == expected "
+            "for every split (asserted before training)."
+        )
+    lines += [
+        "",
+        "## Caveats",
+        "",
+        "- Per-language EER rests on uneven support: Gujarati has 156 test clips "
+        "vs 200 for the majority languages (Tamil 191, Odia 182, Bengali 180). "
+        "Treat its interval as materially wider.",
+        "- Features cached in float16 (halves cache size; the Step 5 smoke test "
+        "ran fp32).",
+        "- 1 seed, not 3 — compressed 15-day timeline.",
+        "- Metadata carries no speaker field, so speaker-disjointness across "
+        "splits cannot be verified from this repo.",
+        "",
+        f"- Checkpoints: `{os.path.basename(checkpoint_dir)}/best_model.pt`, "
+        f"`{os.path.basename(checkpoint_dir)}/last_model.pt`",
+        "",
+    ]
+
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+
+    return path
+
+
+def run_step6_resilient(
+    drive_workdir: str = DEFAULT_DRIVE_WORKDIR,
+    repo_dir: str = DEFAULT_REPO_DIR,
+    config: Optional[TrainConfig] = None,
+    require_drive: bool = True,
+    status_only: bool = False,
+    **step6_kwargs,
+) -> Dict[str, Any]:
+    """
+    Single idempotent entry point for Step 6.
+
+    Safe to re-run after any disconnect, at any point. It reports where things
+    stand, then skips what is done, resumes what is partial, and continues.
+
+    Args:
+        drive_workdir: where the cache and checkpoints live. Must be on Drive to
+            survive a disconnect.
+        require_drive: refuse to run if Drive cannot be mounted, rather than
+            silently writing to disposable local disk.
+        status_only: print the status report and stop.
+        **step6_kwargs: forwarded to run_step6_training (e.g.
+            extract_batch_size, max_clips_per_split, store_dtype).
+    """
+    config = config or TrainConfig()
+
+    print("\n" + "#" * 64)
+    print("# STEP 6 — RESILIENT RUNNER")
+    print("#" * 64 + "\n")
+
+    # --- 1. Drive -----------------------------------------------------------
+    mounted = ensure_drive_mounted()
+    if not mounted and require_drive and in_colab():
+        raise RuntimeError(
+            "Google Drive is not mounted. Authorize the popup and re-run this "
+            "cell. Pass require_drive=False to run against local disk anyway — "
+            "but everything will be lost on the next disconnect."
+        )
+
+    workdir = drive_workdir if mounted else os.path.join("/content", "step6_local")
+    cache_dir = os.path.join(workdir, "feature_cache")
+    checkpoint_dir = os.path.join(workdir, "checkpoints")
+    os.makedirs(cache_dir, exist_ok=True)
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    print(f"Working directory: {workdir}"
+          + ("" if mounted else "   <-- LOCAL DISK, WIPED ON DISCONNECT"))
+
+    # --- 2. Repo ------------------------------------------------------------
+    if in_colab():
+        try:
+            repo_dir = ensure_repo(repo_dir)
+        except Exception as exc:  # noqa: BLE001
+            print(f"Repo sync skipped ({type(exc).__name__}: {exc})")
+    else:
+        repo_dir = REPO_ROOT
+
+    # --- 3. Status ----------------------------------------------------------
+    status = print_status_report(cache_dir, checkpoint_dir, config)
+    if status_only:
+        return {"status": status, "workdir": workdir}
+
+    # --- 4. Do the work -----------------------------------------------------
+    summary = run_step6_training(
+        config=config,
+        cache_dir=cache_dir,
+        checkpoint_dir=checkpoint_dir,
+        **step6_kwargs,
+    )
+
+    # --- 5. Git-ready summary ----------------------------------------------
+    summary["failed_clips"] = sum(
+        (read_manifest(n, cache_dir) or {}).get("num_failed", 0)
+        for n in ("train", "validation")
+    )
+    results_path = write_git_ready_summary(summary, repo_dir, checkpoint_dir)
+
+    print("\n" + "=" * 64)
+    print("STEP 6 COMPLETE")
+    print("=" * 64)
+    print(f"Validation EER : {summary['val_eer'] * 100:.2f}%")
+    print(f"ECE            : {summary['ece_before']:.4f} -> {summary['ece_after']:.4f}")
+    print(f"Results file   : {results_path}")
+    print("\nNext action — commit:")
+    print(f"  cd {repo_dir}")
+    print("  git add docs/STEP6_RESULTS.md")
+    print(f'  git commit -m "Step 6: validation EER '
+          f'{summary["val_eer"] * 100:.2f}%"')
+    print("  git push -u origin claude/ml-repo-structure-review-fpox8u")
+    print("=" * 64 + "\n")
+
+    summary["results_path"] = results_path
+    summary["workdir"] = workdir
+    return summary
+
+
 if __name__ == "__main__":
     raise SystemExit(
         "model_pipeline.py is a library module. "
         "Run Step 6 from Colab: "
-        "`from model_pipeline import run_step6_training; run_step6_training()`"
+        "`from model_pipeline import run_step6_resilient; run_step6_resilient()`"
     )
