@@ -1294,6 +1294,401 @@ def _report_timings(
     )
 
 
+# ---------------------------------------------------------------------------
+# Cache audit and repair
+# ---------------------------------------------------------------------------
+# A cache that has been copied between machines, partially re-downloaded, and
+# resumed across sessions can drift from its manifest in several independent
+# ways. These tools find and fix that drift without re-extracting anything.
+
+def audit_feature_cache(
+    split_name: str,
+    cache_dir: str = FEATURE_CACHE_DIR,
+    target_ids: Optional[set] = None,
+    compare_tensors: bool = True,
+    verbose: bool = True,
+) -> Dict[str, Any]:
+    """
+    Inspect a cache for every way it can disagree with its manifest.
+
+    Checks, independently:
+      * clip IDs appearing more than once (within or across shards)
+      * whether duplicate copies hold identical tensors (benign double-copy) or
+        different ones (something worse)
+      * clips listed as failed that are actually present in a shard — a clip that
+        failed once and succeeded on a later resume leaves a stale failure entry
+      * cached clips that are not in the split's target ID set at all
+      * target clips that are neither cached nor recorded as failed
+      * manifest shard counts that disagree with the shard payloads
+      * manifest shards missing from disk, and shard files not in the manifest
+    """
+    manifest = read_manifest(split_name, cache_dir)
+    if manifest is None:
+        raise FileNotFoundError(f"No manifest for '{split_name}' in {cache_dir}.")
+
+    if target_ids is None:
+        splits = load_frozen_split()
+        target_ids = set(splits[split_name])
+
+    occurrences: Dict[str, List[Tuple[int, int]]] = {}
+    count_mismatches: List[Tuple[int, int, int]] = []
+    files_missing: List[str] = []
+    shard_payload_cache: Dict[int, Any] = {}
+
+    def get_shard(idx: int):
+        if idx not in shard_payload_cache:
+            path = os.path.join(cache_dir, manifest["shards"][idx]["file"])
+            shard_payload_cache[idx] = torch.load(path)
+        return shard_payload_cache[idx]
+
+    for shard_idx, shard in enumerate(manifest["shards"]):
+        path = os.path.join(cache_dir, shard["file"])
+        if not os.path.exists(path):
+            files_missing.append(shard["file"])
+            continue
+
+        clip_ids = shard["clip_ids"]
+
+        # Trust but verify: the payload is the ground truth, the manifest is a
+        # description of it, and this cache's history is exactly the kind that
+        # makes them disagree.
+        try:
+            actual = len(torch.load(path))
+        except Exception as exc:  # noqa: BLE001
+            if verbose:
+                print(f"  shard {shard['file']} unreadable: {exc}")
+            actual = -1
+
+        if actual != shard["count"] or len(clip_ids) != shard["count"]:
+            count_mismatches.append((shard_idx, shard["count"], actual))
+
+        for offset, clip_id in enumerate(clip_ids):
+            occurrences.setdefault(clip_id, []).append((shard_idx, offset))
+
+    listed = {s["file"] for s in manifest["shards"]}
+    on_disk = {
+        f for f in os.listdir(cache_dir)
+        if f.startswith(f"{split_name}_shard_") and f.endswith(".pt")
+    }
+    files_orphan = sorted(on_disk - listed)
+
+    duplicates = {cid: locs for cid, locs in occurrences.items() if len(locs) > 1}
+
+    # Do the duplicate copies actually agree?
+    tensor_status: Dict[str, str] = {}
+    if compare_tensors and duplicates:
+        for clip_id, locs in duplicates.items():
+            try:
+                first_feats, first_label = get_shard(locs[0][0])[locs[0][1]]
+            except Exception as exc:  # noqa: BLE001
+                tensor_status[clip_id] = f"unreadable: {type(exc).__name__}"
+                continue
+
+            verdicts = set()
+            for shard_idx, offset in locs[1:]:
+                try:
+                    feats, label = get_shard(shard_idx)[offset]
+                except Exception as exc:  # noqa: BLE001
+                    verdicts.add(f"unreadable: {type(exc).__name__}")
+                    continue
+                if label != first_label:
+                    verdicts.add("LABEL MISMATCH")
+                elif tuple(feats.shape) != tuple(first_feats.shape):
+                    verdicts.add(
+                        f"shape {tuple(first_feats.shape)} vs {tuple(feats.shape)}"
+                    )
+                elif torch.equal(feats, first_feats):
+                    verdicts.add("identical")
+                else:
+                    verdicts.add("DIFFERENT VALUES")
+            tensor_status[clip_id] = ", ".join(sorted(verdicts))
+
+    failed_ids = set(manifest.get("failed_clip_ids") or [])
+    cached_ids = set(occurrences)
+
+    failed_but_cached = sorted(failed_ids & cached_ids)
+    unexpected = sorted(cached_ids - target_ids)
+    missing = sorted(target_ids - cached_ids - failed_ids)
+
+    redundant_entries = sum(len(v) - 1 for v in duplicates.values())
+
+    result = {
+        "split": split_name,
+        "expected": len(target_ids),
+        "manifest_num_clips": manifest["num_clips"],
+        "entries_total": sum(len(v) for v in occurrences.values()),
+        "unique_cached": len(cached_ids),
+        "duplicates": duplicates,
+        "duplicate_tensor_status": tensor_status,
+        "redundant_entries": redundant_entries,
+        "failed_ids": sorted(failed_ids),
+        "failed_but_cached": failed_but_cached,
+        "unexpected_ids": unexpected,
+        "missing_ids": missing,
+        "count_mismatches": count_mismatches,
+        "files_missing": files_missing,
+        "files_orphan": files_orphan,
+    }
+
+    if verbose:
+        _print_cache_audit(result)
+
+    return result
+
+
+def _print_cache_audit(a: Dict[str, Any]) -> None:
+    print("=" * 64)
+    print(f"CACHE AUDIT — {a['split']}")
+    print("=" * 64)
+    print(f"  expected (frozen split) : {a['expected']:,}")
+    print(f"  manifest num_clips      : {a['manifest_num_clips']:,}")
+    print(f"  entries across shards   : {a['entries_total']:,}")
+    print(f"  unique clip IDs         : {a['unique_cached']:,}")
+    print(f"  redundant entries       : {a['redundant_entries']:,}")
+    print(f"  recorded failures       : {len(a['failed_ids']):,}")
+
+    if a["duplicates"]:
+        print(f"\n  DUPLICATED CLIP IDS ({len(a['duplicates'])}):")
+        for clip_id, locs in sorted(a["duplicates"].items()):
+            status = a["duplicate_tensor_status"].get(clip_id, "not compared")
+            where = ", ".join(f"shard {s}@{o}" for s, o in locs)
+            print(f"    {clip_id:<28} x{len(locs)}  [{status}]  {where}")
+
+    if a["failed_but_cached"]:
+        print(
+            f"\n  STALE FAILURES ({len(a['failed_but_cached'])}) — listed as failed "
+            "but present in a shard (recovered on a later resume):"
+        )
+        for cid in a["failed_but_cached"]:
+            print(f"    {cid}")
+
+    if a["unexpected_ids"]:
+        print(f"\n  NOT IN THIS SPLIT ({len(a['unexpected_ids'])}):")
+        for cid in a["unexpected_ids"][:20]:
+            print(f"    {cid}")
+        if len(a["unexpected_ids"]) > 20:
+            print(f"    ... and {len(a['unexpected_ids']) - 20} more")
+
+    if a["missing_ids"]:
+        print(f"\n  MISSING ({len(a['missing_ids'])}) — neither cached nor failed:")
+        for cid in a["missing_ids"][:20]:
+            print(f"    {cid}")
+        if len(a["missing_ids"]) > 20:
+            print(f"    ... and {len(a['missing_ids']) - 20} more")
+
+    if a["count_mismatches"]:
+        print("\n  MANIFEST/PAYLOAD COUNT MISMATCHES (shard, manifest, actual):")
+        for row in a["count_mismatches"]:
+            print(f"    {row}")
+
+    if a["files_missing"]:
+        print(f"\n  SHARD FILES MISSING FROM DISK: {a['files_missing']}")
+    if a["files_orphan"]:
+        print(f"\n  SHARD FILES NOT IN MANIFEST: {a['files_orphan']}")
+
+    # Preview assumes the default repair: dedup, drop cross-split clips, and
+    # clear stale failure entries.
+    kept = a["unique_cached"] - len(a["unexpected_ids"])
+    live_failures = len(set(a["failed_ids"]) - set(a["failed_but_cached"]))
+    reconciled = kept + live_failures
+    print(
+        f"\n  after repair would be: {kept:,} cached + {live_failures:,} failed "
+        f"= {reconciled:,} vs {a['expected']:,} expected"
+        + ("  OK" if reconciled == a["expected"] else "  STILL SHORT")
+    )
+    if reconciled != a["expected"] and a["missing_ids"]:
+        print(
+            f"  ({len(a['missing_ids']):,} clip(s) missing entirely — those need "
+            "re-extraction, not repair)"
+        )
+    print("=" * 64)
+
+
+def repair_feature_cache(
+    split_name: str,
+    cache_dir: str = FEATURE_CACHE_DIR,
+    dry_run: bool = True,
+    drop_unexpected: bool = True,
+    target_ids: Optional[set] = None,
+) -> Dict[str, Any]:
+    """
+    Deduplicate a cache and reconcile its manifest, without re-extracting.
+
+    Actions, all idempotent:
+      * keep the FIRST occurrence of each clip ID, drop later ones
+      * optionally drop cached clips not in the split's target set
+      * drop stale entries from failed_clip_ids for clips that are actually
+        cached (recovered on a later resume)
+      * rewrite only the shards that changed, then rewrite the manifest with
+        corrected counts
+
+    Run with dry_run=True first to see the plan. Nothing is deleted except
+    redundant entries; feature data for kept clips is never rewritten in place
+    beyond being re-saved into its own shard.
+    """
+    audit = audit_feature_cache(
+        split_name, cache_dir, target_ids=target_ids, verbose=False
+    )
+    manifest = read_manifest(split_name, cache_dir)
+    assert manifest is not None
+
+    # (shard_idx, offset) pairs to remove.
+    drop: Dict[int, set] = {}
+
+    for clip_id, locs in audit["duplicates"].items():
+        for shard_idx, offset in locs[1:]:          # keep locs[0]
+            drop.setdefault(shard_idx, set()).add(offset)
+
+    dropped_unexpected = 0
+    if drop_unexpected and audit["unexpected_ids"]:
+        unexpected = set(audit["unexpected_ids"])
+        for shard_idx, shard in enumerate(manifest["shards"]):
+            for offset, clip_id in enumerate(shard["clip_ids"]):
+                if clip_id in unexpected:
+                    drop.setdefault(shard_idx, set()).add(offset)
+                    dropped_unexpected += 1
+
+    stale_failures = set(audit["failed_but_cached"])
+    new_failed = [
+        cid for cid in (manifest.get("failed_clip_ids") or [])
+        if cid not in stale_failures
+    ]
+
+    total_drops = sum(len(v) for v in drop.values())
+
+    plan = {
+        "split": split_name,
+        "shards_to_rewrite": sorted(drop),
+        "entries_to_drop": total_drops,
+        "duplicate_entries_dropped": total_drops - dropped_unexpected,
+        "unexpected_entries_dropped": dropped_unexpected,
+        "stale_failures_cleared": sorted(stale_failures),
+        "resulting_clips": audit["unique_cached"] - (
+            len(audit["unexpected_ids"]) if drop_unexpected else 0
+        ),
+        "resulting_failed": len(new_failed),
+        "expected": audit["expected"],
+        "missing_ids": audit["missing_ids"],
+    }
+
+    print("\n--- REPAIR PLAN ---")
+    print(f"  shards to rewrite       : {len(plan['shards_to_rewrite'])}")
+    print(f"  duplicate entries drop  : {plan['duplicate_entries_dropped']}")
+    print(f"  unexpected entries drop : {plan['unexpected_entries_dropped']}")
+    print(f"  stale failures cleared  : {len(plan['stale_failures_cleared'])}")
+    print(
+        f"  result                  : {plan['resulting_clips']:,} cached + "
+        f"{plan['resulting_failed']:,} failed = "
+        f"{plan['resulting_clips'] + plan['resulting_failed']:,} "
+        f"vs {plan['expected']:,} expected"
+    )
+
+    if dry_run:
+        print("  DRY RUN — nothing written. Re-run with dry_run=False to apply.")
+        return plan
+
+    new_shards: List[Dict[str, Any]] = []
+    for shard_idx, shard in enumerate(manifest["shards"]):
+        path = os.path.join(cache_dir, shard["file"])
+
+        if shard_idx not in drop:
+            new_shards.append(shard)
+            continue
+
+        payload = torch.load(path)
+        offsets = drop[shard_idx]
+
+        kept_payload = [x for i, x in enumerate(payload) if i not in offsets]
+        kept_ids = [
+            c for i, c in enumerate(shard["clip_ids"]) if i not in offsets
+        ]
+
+        if not kept_payload:
+            os.remove(path)
+            print(f"  shard {shard['file']}: now empty, removed")
+            continue
+
+        tmp = path + ".tmp"
+        torch.save(kept_payload, tmp)
+        os.replace(tmp, path)
+
+        new_shards.append({
+            "file": shard["file"],
+            "count": len(kept_payload),
+            "bytes": os.path.getsize(path),
+            "clip_ids": kept_ids,
+        })
+        print(
+            f"  shard {shard['file']}: {shard['count']} -> {len(kept_payload)} "
+            f"({len(offsets)} dropped)"
+        )
+
+    write_manifest(
+        split_name,
+        new_shards,
+        manifest.get("store_dtype", "float16"),
+        complete=True,
+        cache_dir=cache_dir,
+        capped=manifest.get("capped"),
+        expected_clips=audit["expected"],
+        failed_clip_ids=new_failed,
+    )
+
+    after = read_manifest(split_name, cache_dir) or {}
+    print(
+        f"\n  manifest rewritten: {after.get('num_clips'):,} cached + "
+        f"{after.get('num_failed'):,} failed, "
+        f"accounted_for={after.get('accounted_for')}"
+    )
+
+    plan["applied"] = True
+    plan["accounted_for"] = after.get("accounted_for")
+    return plan
+
+
+def repair_all_caches(
+    cache_dir: str = FEATURE_CACHE_DIR,
+    splits: Sequence[str] = ("train", "validation"),
+    dry_run: bool = True,
+) -> Dict[str, Any]:
+    """Audit + repair every split, then re-verify. One call for the Kaggle cell."""
+    out: Dict[str, Any] = {}
+    for name in splits:
+        if read_manifest(name, cache_dir) is None:
+            print(f"[{name}] no manifest — skipping")
+            continue
+        audit_feature_cache(name, cache_dir)
+        out[name] = repair_feature_cache(name, cache_dir, dry_run=dry_run)
+
+    if not dry_run:
+        print("\n" + "=" * 64)
+        print("POST-REPAIR VERIFICATION")
+        print("=" * 64)
+        ok = True
+        for name in splits:
+            man = read_manifest(name, cache_dir)
+            if man is None:
+                continue
+            good = man.get("accounted_for") is True
+            ok = ok and good
+            print(
+                f"  [{name}] {man['num_clips']:,} + {man['num_failed']:,} = "
+                f"{man['num_clips'] + man['num_failed']:,} / "
+                f"{man['expected_clips']:,}  "
+                f"accounted_for={man.get('accounted_for')}  "
+                f"{'OK' if good else 'STILL BROKEN'}"
+            )
+        print(
+            "\n"
+            + ("All splits reconcile — run_step6_training will proceed."
+               if ok else
+               "Still not reconciling. Re-run audit_feature_cache for detail.")
+        )
+        out["all_ok"] = ok
+
+    return out
+
+
 class ShardedFeatureDataset(Dataset):
     """
     Reads a sharded feature cache without holding it all in RAM.
