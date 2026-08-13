@@ -4,3 +4,10 @@
 **Blocking Ashitha on:** nothing
 **Waiting on Ashitha for:** nothing further right now
 **Numbers to report (if any):** none yet — first real EER numbers come after Step 6
+
+### SYNC HANDOFF — Model Pipeline — 2026-08-10 (2)
+**Interface changes:** none to the shared contract yet — `analyze_bytes(audio_bytes) -> AnalysisResult` and `evaluate_dataset(clip_ids, labels) -> dict` are stubbed in `model_pipeline.py` §11 awaiting Ashitha's exact `AnalysisResult` fields and return schema. **Path change teammates must know about:** `model_pipeline/` (artifacts) is now `model_pipeline_artifacts/`, so `split_metadata_verified.json` moved to `model_pipeline_artifacts/split_metadata_verified.json`. `data_pipeline/split_ids.json` is unmoved and unchanged.
+**Completed this session:** consolidated the verified Colab code (Steps 1-5) into `model_pipeline.py` as an importable module; reconciled the training loop against the verified Step 5 cells (corrected weight_decay to AdamW's 0.01 default, removed gradient clipping that was not in the verified run, restored the 4-key checkpoint format incl. loss_history); renamed the artifacts directory to clear a Python import collision with `model_pipeline.py`.
+**Blocking Ashitha on:** nothing
+**Waiting on Ashitha for:** the exact `AnalysisResult` dataclass fields and `evaluate_dataset` return schema, so §11 can be filled in
+**Numbers to report (if any):** none yet — still none until Step 6. The only numbers so far (loss 0.7146 -> ~0.09) are from a 150-clip smoke test and are not reportable results.

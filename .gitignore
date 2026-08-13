@@ -1,0 +1,8 @@
+# Training artifacts written by model_pipeline.py — never commit these.
+checkpoints/
+feature_cache/
+
+# Python
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
