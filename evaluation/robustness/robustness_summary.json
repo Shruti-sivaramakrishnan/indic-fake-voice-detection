@@ -1,0 +1,41 @@
+{
+  "clean": {
+    "eer_percent": 1.0286,
+    "roc_auc": 0.9996,
+    "accuracy_percent": 96.3356
+  },
+  "opus_16kbps": {
+    "test_clips": 3111,
+    "real_clips": 1558,
+    "fake_clips": 1553,
+    "eer": 0.03664426051858717,
+    "eer_percent": 3.664426051858717,
+    "eer_threshold_bonafide_score": -3.0562245845794678,
+    "roc_auc": 0.9942258430616298,
+    "classification_threshold_logit": 2.1031923294067383,
+    "accuracy": 0.9620700739312118,
+    "accuracy_percent": 96.20700739312117,
+    "degradation": "opus_16kbps",
+    "successful_predictions": 3111,
+    "failures": 0,
+    "total_time_sec": 358.59389877319336,
+    "average_time_sec": 0.11526644126428588
+  },
+  "musan_10db": {
+    "test_clips": 3111,
+    "real_clips": 1558,
+    "fake_clips": 1553,
+    "eer": 0.2851175454852797,
+    "eer_percent": 28.511754548527968,
+    "eer_threshold_bonafide_score": -0.6032737493515015,
+    "roc_auc": 0.7909355117884387,
+    "classification_threshold_logit": 2.1031923294067383,
+    "accuracy": 0.7168113146898103,
+    "accuracy_percent": 71.68113146898104,
+    "degradation": "musan_10db",
+    "successful_predictions": 3111,
+    "failures": 0,
+    "total_time_sec": 334.6444137096405,
+    "average_time_sec": 0.10756811755372565
+  }
+}
