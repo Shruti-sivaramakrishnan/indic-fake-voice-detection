@@ -2476,18 +2476,22 @@ def train_model(
 # SECTION 11 — Shared interface contract (Ashitha: PDF report generator + UI)
 # ============================================================================
 #     analyze_bytes(audio_bytes) -> AnalysisResult      IMPLEMENTED
-#     evaluate_dataset(clip_ids, labels) -> dict        still a placeholder
+#     evaluate_dataset(clip_ids, labels) -> dict         IMPLEMENTED
 #
-# analyze_bytes is wired to the real trained head. Its AnalysisResult field set is
-# the one requested (verdict, confidence, detected_language, language_eer,
-# raw_score, audio_hash) but Ashitha has NOT confirmed the final dataclass — add
-# anything she needs to `metadata` rather than renaming the six fields, so her
-# side does not break silently.
+# Both are wired to the real trained head (checkpoints/best_model.pt) and share
+# the same load_inference_bundle() cache, so loading the model twice in one
+# process never happens. Ashitha has NOT confirmed the final AnalysisResult
+# dataclass or evaluate_dataset's dict schema — add anything she needs rather
+# than renaming existing fields, so her side does not break silently.
 #
-# Two values are deliberately absent rather than invented:
+# Two values in AnalysisResult are deliberately absent rather than invented:
 #   * detected_language is "unknown" — there is no language classifier here.
 #   * language_eer is None until a per-language EER table exists AND a language
 #     is known. A fabricated per-language EER would flow straight into the PDF.
+#
+# evaluate_dataset(..., write_language_eer_file=True) is the one place that
+# PRODUCES checkpoints/per_language_eer.json — run it once on the real test
+# split and analyze_bytes() picks the table up automatically from then on.
 #
 # Record any change to this section in docs/TEAM_SYNC_LOG.md under
 # "Interface changes".
@@ -2794,25 +2798,326 @@ def analyze_bytes(
     )
 
 
-def evaluate_dataset(clip_ids: Sequence[str], labels: Sequence[int]) -> dict:
+def binary_classification_metrics(
+    y_true: Sequence[int], y_pred: Sequence[int]
+) -> Dict[str, Any]:
     """
-    PLACEHOLDER — batch evaluation over a set of clip IDs.
+    Accuracy/precision/recall/F1/confusion matrix, positive class = fake (1).
 
-    Intended flow once the contract lands:
-        1. resolve features for clip_ids (feature cache first, stream as fallback)
-        2. collect_logits over the batch
-        3. eer_from_logits_and_labels(...) for overall EER
-        4. per-language breakdown via build_label_lookup()'s language map
-        5. calibrated probabilities -> compute_ece(...)
-        6. return the agreed dict schema
+    Pure Python, no numpy/sklearn dependency — these are simple counts, and
+    keeping them dependency-free makes this function testable anywhere.
 
-    Per-language caveat to carry into the report: Gujarati has 156 test clips vs
-    200 for the majority languages (Tamil 191, Odia 182, Bengali 180), so its
-    per-language EER has a materially wider confidence interval.
+    Distinct from EER: EER is threshold-independent (it IS the operating point
+    where FAR=FNR); these metrics require a single fixed decision (y_pred), which
+    is the caller's job to produce — see decision_threshold in evaluate_dataset.
     """
-    raise NotImplementedError(
-        "evaluate_dataset is pending the shared interface contract with Ashitha."
+    tp = tn = fp = fn = 0
+    for t, p in zip(y_true, y_pred):
+        if t == LABEL_FAKE and p == LABEL_FAKE:
+            tp += 1
+        elif t == LABEL_REAL and p == LABEL_REAL:
+            tn += 1
+        elif t == LABEL_REAL and p == LABEL_FAKE:
+            fp += 1
+        elif t == LABEL_FAKE and p == LABEL_REAL:
+            fn += 1
+        else:
+            raise ValueError(f"Labels/predictions must be 0/1, got {t!r}/{p!r}")
+
+    n = tp + tn + fp + fn
+    accuracy = (tp + tn) / n if n else 0.0
+    precision = tp / (tp + fp) if (tp + fp) else 0.0
+    recall = tp / (tp + fn) if (tp + fn) else 0.0
+    f1 = (
+        2 * precision * recall / (precision + recall)
+        if (precision + recall) else 0.0
     )
+
+    return {
+        "accuracy": accuracy,
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "confusion_matrix": {
+            "positive_class": "fake",
+            "labels": {"real": LABEL_REAL, "fake": LABEL_FAKE},
+            "tp": tp, "tn": tn, "fp": fp, "fn": fn,
+        },
+        "support": n,
+    }
+
+
+def ensure_features_cached_for_ids(
+    clip_ids: Sequence[str],
+    labels: Sequence[int],
+    language_lookup: Optional[Dict[str, str]] = None,
+    cache_split_name: str = "eval",
+    cache_dir: str = FEATURE_CACHE_DIR,
+    extract_batch_size: int = 8,
+    max_failure_pct: float = 5.0,
+) -> Dict[str, Any]:
+    """
+    Extract features for exactly these clip IDs if they are not already cached,
+    reusing the same streaming/batching/resume/failure-handling machinery as
+    Step 6 (build_feature_caches_streaming) rather than a second code path.
+
+    Idempotent: a fully-cached call is a fast no-op (build_feature_caches_streaming
+    prints "already cached" and returns immediately).
+    """
+    label_lookup = dict(zip(clip_ids, labels))
+
+    manifests = build_feature_caches_streaming(
+        targets={cache_split_name: set(clip_ids)},
+        label_lookup=label_lookup,
+        language_lookup=language_lookup,
+        cache_dir=cache_dir,
+        resume=True,
+        extract_batch_size=extract_batch_size,
+    )
+
+    man = manifests[cache_split_name]
+    if not man.get("complete"):
+        raise RuntimeError(
+            f"Feature cache for '{cache_split_name}' did not complete. "
+            "Re-run to resume."
+        )
+
+    n_failed = man.get("num_failed", 0)
+    expected = man.get("expected_clips") or len(clip_ids)
+    pct = n_failed / expected * 100 if expected else 0.0
+    if pct > max_failure_pct:
+        raise RuntimeError(
+            f"'{cache_split_name}' lost {pct:.2f}% of clips to decode failures "
+            f"(> max_failure_pct={max_failure_pct}). See "
+            f"{failed_clips_path(cache_dir)} before trusting this evaluation."
+        )
+    if n_failed:
+        print(
+            f"NOTE: {n_failed} clip(s) failed to decode and are excluded from "
+            f"evaluation ({pct:.2f}%). See {failed_clips_path(cache_dir)}."
+        )
+
+    return man
+
+
+def load_features_for_ids(
+    cache_split_name: str,
+    cache_dir: str,
+    clip_ids: Sequence[str],
+) -> Tuple[Dict[str, torch.Tensor], List[str]]:
+    """
+    Pull exactly the requested clip IDs' feature tensors out of a sharded cache.
+
+    Scans manifest shard contents rather than trusting that the cache holds
+    nothing else — a cache built for one purpose can accumulate leftover clips
+    from an earlier, different call under the same split name (see the audit/
+    repair tools). Ignoring everything not explicitly requested makes this
+    immune to that, regardless of cache history.
+
+    Returns (found: {clip_id: feature_tensor}, missing: [clip_id, ...]).
+    """
+    manifest = read_manifest(cache_split_name, cache_dir)
+    if manifest is None:
+        return {}, list(clip_ids)
+
+    wanted = set(clip_ids)
+    locations: Dict[str, Tuple[int, int]] = {}
+    for shard_idx, shard in enumerate(manifest["shards"]):
+        for offset, cid in enumerate(shard["clip_ids"]):
+            # First occurrence wins — matches repair_feature_cache's convention
+            # for a duplicated ID, so a cache that hasn't been repaired yet still
+            # evaluates consistently with what repair would keep.
+            if cid in wanted and cid not in locations:
+                locations[cid] = (shard_idx, offset)
+
+    found: Dict[str, torch.Tensor] = {}
+    shard_cache: Dict[int, Any] = {}
+    for cid in clip_ids:
+        if cid not in locations:
+            continue
+        shard_idx, offset = locations[cid]
+        if shard_idx not in shard_cache:
+            path = os.path.join(cache_dir, manifest["shards"][shard_idx]["file"])
+            shard_cache[shard_idx] = torch.load(path)
+        feats, _cached_label = shard_cache[shard_idx][offset]
+        found[cid] = feats.float()
+
+    missing = [cid for cid in clip_ids if cid not in found]
+    return found, missing
+
+
+def evaluate_dataset(
+    clip_ids: Sequence[str],
+    labels: Sequence[int],
+    checkpoint_dir: str = CHECKPOINT_DIR,
+    cache_dir: str = FEATURE_CACHE_DIR,
+    cache_split_name: str = "eval",
+    language_lookup: Optional[Dict[str, str]] = None,
+    decision_threshold: float = 0.5,
+    batch_size: int = 16,
+    extract_batch_size: int = 8,
+    min_language_support: int = 1,
+    write_language_eer_file: bool = False,
+) -> dict:
+    """
+    Run the trained head over a set of clips and score it.
+
+    Args:
+        clip_ids, labels: parallel sequences; labels use the metadata convention
+            (0 = real, 1 = fake). This is the ground truth used for every metric
+            below — NOT the label baked into the feature cache, if one exists.
+        cache_split_name: feature-cache bucket to build/reuse for this exact ID
+            set. Using the same name across DIFFERENT id sets between calls is
+            safe (load_features_for_ids only reads what it's asked for) but
+            wastes disk — prefer a name matching what you're evaluating (e.g.
+            "test").
+        decision_threshold: cut on CALIBRATED P(fake) used ONLY for
+            accuracy/precision/recall/f1/confusion_matrix, which need a single
+            binary decision. This is a different concept from:
+              * the banded real/uncertain/fake verdict thresholds in Section 11
+                (VERDICT_REAL_MAX_P_FAKE / VERDICT_FAKE_MIN_P_FAKE), and
+              * the EER operating threshold (bonafide-score space, returned
+                separately as pooled.eer_threshold) — EER itself does not depend
+                on this argument at all.
+        min_language_support: languages with fewer than this many clips are
+            still reported (with their n) but their EER is set to None rather
+            than computed on too few points to be meaningful.
+        write_language_eer_file: if True, writes checkpoint_dir/per_language_eer.json
+            from this run's per-language EER. That file is what analyze_bytes()
+            reads for AnalysisResult.language_eer — this is deliberately the one
+            place that produces it, so nothing downstream fabricates a number.
+
+    Returns a dict with pooled EER/accuracy/precision/recall/f1/confusion_matrix,
+    a per-language EER breakdown with support counts, and bookkeeping (which
+    clips were actually evaluated, which were missing, calibration info).
+    """
+    if len(clip_ids) != len(labels):
+        raise ValueError(
+            f"clip_ids ({len(clip_ids)}) and labels ({len(labels)}) length mismatch."
+        )
+    if not clip_ids:
+        raise ValueError("clip_ids is empty — nothing to evaluate.")
+
+    label_lookup = dict(zip(clip_ids, labels))
+    if len(label_lookup) != len(clip_ids):
+        dupes = [c for c in set(clip_ids) if clip_ids.count(c) > 1]
+        conflicting = [c for c in dupes if len({labels[i] for i, x in
+                       enumerate(clip_ids) if x == c}) > 1]
+        if conflicting:
+            raise ValueError(
+                f"clip_ids contains duplicates with CONFLICTING labels: "
+                f"{conflicting[:10]}"
+            )
+        print(f"NOTE: {len(dupes)} duplicate clip_id(s) with matching labels — "
+              "deduplicated.")
+
+    if language_lookup is None:
+        _, language_lookup = build_label_lookup()
+
+    bundle = load_inference_bundle(checkpoint_dir=checkpoint_dir)
+
+    ensure_features_cached_for_ids(
+        clip_ids=list(label_lookup),
+        labels=[label_lookup[c] for c in label_lookup],
+        language_lookup=language_lookup,
+        cache_split_name=cache_split_name,
+        cache_dir=cache_dir,
+        extract_batch_size=extract_batch_size,
+    )
+
+    features, missing = load_features_for_ids(
+        cache_split_name, cache_dir, list(label_lookup)
+    )
+    if missing:
+        print(
+            f"WARNING: {len(missing)} of {len(label_lookup)} requested clips "
+            f"could not be resolved (decode failure or absent from the stream). "
+            f"Evaluating on the remaining {len(label_lookup) - len(missing)}. "
+            f"First few: {missing[:10]}"
+        )
+    if not features:
+        raise RuntimeError("No clips could be resolved — nothing to evaluate.")
+
+    ordered_ids = [c for c in label_lookup if c in features]
+    feature_list = [
+        (features[c], float(label_lookup[c])) for c in ordered_ids
+    ]
+
+    loader = make_dataloader(feature_list, batch_size=batch_size, shuffle=False)
+    raw_logits, y_true = collect_logits(bundle.head, loader)
+
+    calibrated_logits = raw_logits / bundle.temperature
+    p_fake = 1.0 / (1.0 + np.exp(-calibrated_logits))
+    y_pred = (p_fake > decision_threshold).astype(int)
+
+    pooled = binary_classification_metrics(y_true.astype(int).tolist(), y_pred.tolist())
+
+    # Guard, not an assumption: if enough clips failed to decode/resolve that one
+    # class vanishes entirely from what's left, compute_eer's roc_curve has no
+    # negative (or no positive) class to score against and raises. That must
+    # degrade to eer=None with an explanation, not crash a multi-hour run at the
+    # very last step. Mirrors the per-language handling below.
+    n_real_pooled = int((y_true == LABEL_REAL).sum())
+    n_fake_pooled = int((y_true == LABEL_FAKE).sum())
+    if n_real_pooled >= 1 and n_fake_pooled >= 1:
+        pooled_eer, pooled_eer_threshold = eer_from_logits_and_labels(raw_logits, y_true)
+        pooled["eer"] = float(pooled_eer)
+        pooled["eer_threshold"] = float(pooled_eer_threshold)
+    else:
+        pooled["eer"] = None
+        pooled["eer_threshold"] = None
+        pooled["eer_note"] = (
+            f"pooled EER undefined: only one class present after excluding "
+            f"missing clips (n_real={n_real_pooled}, n_fake={n_fake_pooled})"
+        )
+    pooled["decision_threshold_p_fake"] = decision_threshold
+
+    per_language: Dict[str, Dict[str, Any]] = {}
+    lang_of = [language_lookup.get(c, "unknown") for c in ordered_ids]
+    for lang in sorted(set(lang_of)):
+        idx = [i for i, l in enumerate(lang_of) if l == lang]
+        y_l = y_true[idx]
+        n = len(idx)
+        n_real = int((y_l == LABEL_REAL).sum())
+        n_fake = int((y_l == LABEL_FAKE).sum())
+
+        entry: Dict[str, Any] = {"n": n, "n_real": n_real, "n_fake": n_fake}
+        if n_real >= 1 and n_fake >= 1 and n >= min_language_support:
+            lang_eer, _ = eer_from_logits_and_labels(raw_logits[idx], y_l)
+            entry["eer"] = float(lang_eer)
+        else:
+            entry["eer"] = None
+            entry["note"] = (
+                "single-class bucket, EER undefined" if n_real == 0 or n_fake == 0
+                else f"fewer than min_language_support={min_language_support} clips"
+            )
+        per_language[lang] = entry
+
+    if write_language_eer_file:
+        lang_path = os.path.join(checkpoint_dir, PER_LANGUAGE_EER_FILE)
+        os.makedirs(checkpoint_dir, exist_ok=True)
+        with open(lang_path, "w", encoding="utf-8") as f:
+            json.dump(
+                {l: e["eer"] for l, e in per_language.items() if e["eer"] is not None},
+                f, indent=2,
+            )
+        print(f"Wrote {lang_path} — analyze_bytes() will pick it up on next load "
+              "(or call load_inference_bundle(force_reload=True)).")
+
+    return {
+        "n_requested": len(label_lookup),
+        "n_evaluated": len(ordered_ids),
+        "missing_clip_ids": missing,
+        "pooled": pooled,
+        "per_language": per_language,
+        "calibration": {
+            "temperature": bundle.temperature,
+            "calibrated": bundle.summary_path is not None,
+            "checkpoint": os.path.basename(bundle.checkpoint_path),
+            "checkpoint_epoch": bundle.checkpoint_epoch,
+        },
+        "generated_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
 
 
 # ============================================================================
@@ -3367,6 +3672,123 @@ def write_git_ready_summary(
         "",
         f"- Checkpoints: `{os.path.basename(checkpoint_dir)}/best_model.pt`, "
         f"`{os.path.basename(checkpoint_dir)}/last_model.pt`",
+        "",
+    ]
+
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+
+    return path
+
+
+def write_test_set_summary(
+    result: Dict[str, Any],
+    repo_dir: str,
+    min_language_support: int = 50,
+) -> str:
+    """
+    Write docs/TEST_SET_RESULTS.md from an evaluate_dataset() result.
+
+    This is the first REPORTABLE test-set number, so the file says so plainly
+    and flags every language whose support is too thin to trust its EER —
+    rather than presenting every row with equal apparent confidence.
+    """
+    docs_dir = os.path.join(repo_dir, "docs")
+    os.makedirs(docs_dir, exist_ok=True)
+    path = os.path.join(docs_dir, "TEST_SET_RESULTS.md")
+
+    pooled = result["pooled"]
+    cm = pooled["confusion_matrix"]
+    cal = result["calibration"]
+
+    def pct(x: Optional[float]) -> str:
+        return f"{x * 100:.2f}%" if x is not None else "undefined"
+
+    lines = [
+        "# Test Set Results — Model Pipeline",
+        "",
+        f"_Generated {time.strftime('%Y-%m-%d %H:%M:%S')} by "
+        "`evaluate_test_split.py`, via `model_pipeline.evaluate_dataset()`._",
+        "",
+        "**This is the frozen TEST split — the one Step 6 never touched during "
+        "training or model selection. It should be evaluated exactly once, after "
+        "every training/hyperparameter decision is final. If you are looking at "
+        "this file wondering whether to go change something in Step 6 and re-run "
+        "this — don't; that turns the test set into a second validation set.**",
+        "",
+        "## Headline",
+        "",
+        f"- **Test EER: {pct(pooled['eer'])}**",
+        f"- Accuracy: {pooled['accuracy'] * 100:.2f}%",
+        f"- Precision: {pooled['precision'] * 100:.2f}% "
+        f"(positive class = fake)",
+        f"- Recall: {pooled['recall'] * 100:.2f}%",
+        f"- F1: {pooled['f1']:.4f}",
+        f"- Decision threshold: P(fake) > {pooled['decision_threshold_p_fake']} "
+        "(used for accuracy/precision/recall/f1/confusion matrix only — EER "
+        "itself is threshold-independent)",
+        "",
+        "## Confusion matrix",
+        "",
+        "| | predicted real | predicted fake |",
+        "|---|---|---|",
+        f"| **actual real** | {cm['tn']} (TN) | {cm['fp']} (FP) |",
+        f"| **actual fake** | {cm['fn']} (FN) | {cm['tp']} (TP) |",
+        "",
+        "## Coverage",
+        "",
+        f"- Requested: {result['n_requested']:,}",
+        f"- Evaluated: {result['n_evaluated']:,}",
+        f"- Missing (decode failure or absent from stream): "
+        f"{len(result['missing_clip_ids']):,}",
+    ]
+    if result["missing_clip_ids"]:
+        lines.append(
+            f"  - {', '.join(result['missing_clip_ids'][:15])}"
+            + (" ..." if len(result["missing_clip_ids"]) > 15 else "")
+        )
+
+    lines += [
+        "",
+        "## Per-language EER",
+        "",
+        "| language | n | n_real | n_fake | EER | support |",
+        "|---|---|---|---|---|---|",
+    ]
+    for lang, entry in sorted(result["per_language"].items()):
+        thin = entry["n"] < min_language_support
+        eer_str = pct(entry["eer"])
+        support_flag = f"⚠️ n<{min_language_support}" if thin else "ok"
+        lines.append(
+            f"| {lang} | {entry['n']} | {entry['n_real']} | {entry['n_fake']} | "
+            f"{eer_str} | {support_flag} |"
+        )
+    thin_langs = [
+        l for l, e in result["per_language"].items() if e["n"] < min_language_support
+    ]
+    if thin_langs:
+        lines += [
+            "",
+            f"⚠️ {len(thin_langs)} language(s) have fewer than "
+            f"{min_language_support} test clips — treat their EER as a wide "
+            f"interval, not a point estimate: {', '.join(sorted(thin_langs))}",
+        ]
+
+    lines += [
+        "",
+        "## Calibration",
+        "",
+        f"- Temperature: {cal['temperature']:.4f}",
+        f"- Calibrated (vs. temperature=1.0 fallback): {cal['calibrated']}",
+        f"- Checkpoint: `{cal['checkpoint']}` (epoch {cal['checkpoint_epoch']})",
+        "",
+        "## Caveats",
+        "",
+        "- 1 seed, not 3 — compressed 15-day timeline. This EER has no "
+        "cross-seed variance estimate.",
+        "- Speaker-disjointness across splits cannot be verified from this repo "
+        "(no speaker field in the metadata).",
+        "- Features cached in float16; not re-verified against fp32 on this run.",
         "",
     ]
 
