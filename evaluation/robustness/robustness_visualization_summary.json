@@ -1,0 +1,17 @@
+{
+  "number_of_languages": 16,
+  "conditions": [
+    "Clean",
+    "Opus 16 kbps",
+    "MUSAN 10 dB"
+  ],
+  "worst_opus_eer_language": "Odia",
+  "worst_opus_eer_percent": 3.846153846153844,
+  "worst_musan_eer_language": "Manipuri",
+  "worst_musan_eer_percent": 37.5,
+  "worst_opus_accuracy_language": "Gujarati",
+  "worst_opus_accuracy_percent": 89.74358974358975,
+  "worst_musan_accuracy_language": "Manipuri",
+  "worst_musan_accuracy_percent": 60.0,
+  "figures_directory": "/content/test_evaluation/robustness/figures"
+}
