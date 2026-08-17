@@ -11,7 +11,7 @@ import os, subprocess, sys, importlib
 
 REPO_DIR = "/content/indic-fake-voice-detection"
 REPO_URL = "https://github.com/Shruti-sivaramakrishnan/indic-fake-voice-detection.git"
-BRANCH   = "claude/ml-repo-structure-review-fpox8u"
+BRANCH   = "main"
 
 # 1. Repo: clone if absent, fast-forward if present.
 if os.path.exists(os.path.join(REPO_DIR, "model_pipeline.py")):

@@ -49,6 +49,7 @@ no ONNX quantization this cycle.
 
 from __future__ import annotations
 
+import csv
 import json
 import os
 import random
@@ -2958,6 +2959,7 @@ def evaluate_dataset(
     extract_batch_size: int = 8,
     min_language_support: int = 1,
     write_language_eer_file: bool = False,
+    include_per_clip: bool = False,
 ) -> dict:
     """
     Run the trained head over a set of clips and score it.
@@ -2986,6 +2988,10 @@ def evaluate_dataset(
             from this run's per-language EER. That file is what analyze_bytes()
             reads for AnalysisResult.language_eer — this is deliberately the one
             place that produces it, so nothing downstream fabricates a number.
+        include_per_clip: if True, adds result["per_clip"] — one record per
+            evaluated clip (clip_id, language, true_label, predicted_label,
+            calibrated_p_fake, verdict) for error analysis. Off by default since
+            most callers only need the aggregates. See write_error_analysis().
 
     Returns a dict with pooled EER/accuracy/precision/recall/f1/confusion_matrix,
     a per-language EER breakdown with support counts, and bookkeeping (which
@@ -3050,6 +3056,9 @@ def evaluate_dataset(
     p_fake = 1.0 / (1.0 + np.exp(-calibrated_logits))
     y_pred = (p_fake > decision_threshold).astype(int)
 
+    # Computed once, shared by per_language and per_clip below.
+    lang_of = [language_lookup.get(c, "unknown") for c in ordered_ids]
+
     pooled = binary_classification_metrics(y_true.astype(int).tolist(), y_pred.tolist())
 
     # Guard, not an assumption: if enough clips failed to decode/resolve that one
@@ -3073,7 +3082,6 @@ def evaluate_dataset(
     pooled["decision_threshold_p_fake"] = decision_threshold
 
     per_language: Dict[str, Dict[str, Any]] = {}
-    lang_of = [language_lookup.get(c, "unknown") for c in ordered_ids]
     for lang in sorted(set(lang_of)):
         idx = [i for i, l in enumerate(lang_of) if l == lang]
         y_l = y_true[idx]
@@ -3104,7 +3112,7 @@ def evaluate_dataset(
         print(f"Wrote {lang_path} — analyze_bytes() will pick it up on next load "
               "(or call load_inference_bundle(force_reload=True)).")
 
-    return {
+    result = {
         "n_requested": len(label_lookup),
         "n_evaluated": len(ordered_ids),
         "missing_clip_ids": missing,
@@ -3118,6 +3126,29 @@ def evaluate_dataset(
         },
         "generated_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
+
+    if include_per_clip:
+        # predicted_label uses decision_threshold (matches the confusion matrix
+        # above — this is what write_error_analysis() splits FP/FN on).
+        # verdict uses the SEPARATE frozen real/uncertain/fake band from
+        # Section 11 (VERDICT_REAL_MAX_P_FAKE / VERDICT_FAKE_MIN_P_FAKE) — the
+        # same thresholds analyze_bytes() applies. A clip can be misclassified
+        # by predicted_label yet verdict="uncertain" (borderline p_fake); that
+        # divergence is itself useful for error analysis, not a bug, so both
+        # columns are kept rather than collapsed into one.
+        result["per_clip"] = [
+            {
+                "clip_id": ordered_ids[i],
+                "language": lang_of[i],
+                "true_label": int(y_true[i]),
+                "predicted_label": int(y_pred[i]),
+                "calibrated_p_fake": float(p_fake[i]),
+                "verdict": verdict_from_p_fake(float(p_fake[i])),
+            }
+            for i in range(len(ordered_ids))
+        ]
+
+    return result
 
 
 # ============================================================================
@@ -3440,7 +3471,9 @@ def ensure_drive_mounted(mount_point: str = DRIVE_MOUNT_POINT) -> bool:
 def ensure_repo(
     repo_dir: str = DEFAULT_REPO_DIR,
     repo_url: str = REPO_URL,
-    branch: str = "claude/ml-repo-structure-review-fpox8u",
+    # main only — the claude/* feature branch this project used earlier has
+    # been deleted (repeatedly); all work now lands on main directly.
+    branch: str = "main",
 ) -> str:
     """Clone the repo if absent, otherwise fast-forward it. Idempotent."""
     import subprocess
@@ -3798,6 +3831,97 @@ def write_test_set_summary(
     return path
 
 
+ERROR_ANALYSIS_FIELDNAMES = [
+    "clip_id", "language", "true_label", "predicted_label",
+    "calibrated_p_fake", "verdict",
+]
+
+
+def write_error_analysis(
+    result: Dict[str, Any],
+    repo_dir: str,
+    subdir: str = os.path.join("docs", "error_analysis"),
+) -> Dict[str, Any]:
+    """
+    Write misclassified test clips to CSV for manual error analysis.
+
+    Requires result["per_clip"] — call evaluate_dataset(..., include_per_clip=True)
+    first (evaluate_test_split.py already does this on a real, non-rehearsal run).
+
+    Writes two files under repo_dir/subdir:
+        fp_clips.csv — true_label=real, predicted_label=fake
+        fn_clips.csv — true_label=fake, predicted_label=real
+
+    FP/FN are split on `predicted_label`, which uses the SAME decision_threshold
+    as the confusion matrix in result["pooled"] — this is what makes counting
+    rows here reproduce the confusion matrix's fp/fn cells exactly, and that
+    equality is checked below rather than assumed. `verdict` (the separate,
+    banded real/uncertain/fake column) is carried along per row but does NOT
+    decide which file a clip lands in — a clip can be a "predicted fake" false
+    positive while its verdict reads "uncertain" if its p_fake is borderline,
+    and that's useful signal for review, not a contradiction to resolve away.
+
+    Rows are ordered most-confidently-wrong first: fp_clips.csv descending by
+    calibrated_p_fake (real clips the model was most sure were fake), fn_clips.csv
+    ascending by calibrated_p_fake (fake clips the model was most sure were real).
+    """
+    per_clip = result.get("per_clip")
+    if not per_clip:
+        raise ValueError(
+            "result has no 'per_clip' entries — call evaluate_dataset(clip_ids, "
+            "labels, include_per_clip=True) before write_error_analysis()."
+        )
+
+    out_dir = os.path.join(repo_dir, subdir)
+    os.makedirs(out_dir, exist_ok=True)
+
+    fp_rows = sorted(
+        (r for r in per_clip
+         if r["true_label"] == LABEL_REAL and r["predicted_label"] == LABEL_FAKE),
+        key=lambda r: -r["calibrated_p_fake"],
+    )
+    fn_rows = sorted(
+        (r for r in per_clip
+         if r["true_label"] == LABEL_FAKE and r["predicted_label"] == LABEL_REAL),
+        key=lambda r: r["calibrated_p_fake"],
+    )
+
+    fp_path = os.path.join(out_dir, "fp_clips.csv")
+    fn_path = os.path.join(out_dir, "fn_clips.csv")
+
+    def _write_csv(path: str, rows: List[Dict[str, Any]]) -> None:
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=ERROR_ANALYSIS_FIELDNAMES)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({k: row[k] for k in ERROR_ANALYSIS_FIELDNAMES})
+
+    _write_csv(fp_path, fp_rows)
+    _write_csv(fn_path, fn_rows)
+
+    # Consistency guard: these counts MUST match the confusion matrix computed
+    # from the same per_clip data by binary_classification_metrics. If they ever
+    # diverge, something in one of the two code paths silently disagrees with
+    # the other, and that has to surface loudly rather than as a quietly wrong
+    # CSV someone cites in a report.
+    cm = result.get("pooled", {}).get("confusion_matrix") or {}
+    if cm.get("fp") is not None and len(fp_rows) != cm["fp"]:
+        raise RuntimeError(
+            f"fp_clips.csv has {len(fp_rows)} rows but the confusion matrix "
+            f"says fp={cm['fp']} — per_clip and pooled metrics disagree."
+        )
+    if cm.get("fn") is not None and len(fn_rows) != cm["fn"]:
+        raise RuntimeError(
+            f"fn_clips.csv has {len(fn_rows)} rows but the confusion matrix "
+            f"says fn={cm['fn']} — per_clip and pooled metrics disagree."
+        )
+
+    return {
+        "fp_path": fp_path, "fn_path": fn_path,
+        "n_fp": len(fp_rows), "n_fn": len(fn_rows),
+    }
+
+
 def run_step6_resilient(
     drive_workdir: str = DEFAULT_DRIVE_WORKDIR,
     repo_dir: str = DEFAULT_REPO_DIR,
@@ -3884,7 +4008,7 @@ def run_step6_resilient(
     print("  git add docs/STEP6_RESULTS.md")
     print(f'  git commit -m "Step 6: validation EER '
           f'{summary["val_eer"] * 100:.2f}%"')
-    print("  git push -u origin claude/ml-repo-structure-review-fpox8u")
+    print("  git push origin main")
     print("=" * 64 + "\n")
 
     summary["results_path"] = results_path

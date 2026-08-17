@@ -27,6 +27,17 @@ evaluate_dataset -> ensure_features_cached_for_ids), cached under the "test"
 split name in the same feature_cache directory — separate from train/validation,
 so it survives independently and can resume after a disconnect the same way
 Step 6 does.
+
+On a full (non-rehearsal) run this writes:
+    docs/TEST_SET_RESULTS.md              pooled + per-language metrics
+    checkpoints/per_language_eer.json     consumed by analyze_bytes()
+    docs/error_analysis/fp_clips.csv      real clips misclassified as fake
+    docs/error_analysis/fn_clips.csv      fake clips misclassified as real
+
+The FP/FN CSVs are the exact per-clip breakdown behind TEST_SET_RESULTS.md's
+confusion matrix — same run, same cache, same model, so the two can never
+silently disagree (write_error_analysis() asserts the row counts match the
+confusion matrix cells before writing).
 """
 
 import argparse
@@ -97,6 +108,9 @@ def main(
         # -- write it so analyze_bytes() stops returning language_eer=None for
         # every known language.
         write_language_eer_file=(max_clips is None),
+        # Per-clip records feed the error-analysis CSVs below. Skipped on a
+        # rehearsal since those results aren't written anywhere anyway.
+        include_per_clip=(max_clips is None),
     )
 
     # --- report ---------------------------------------------------------------
@@ -133,20 +147,34 @@ def main(
             result, repo_dir, min_language_support=min_language_support
         )
         print(f"  wrote {results_path}")
+
+        error_paths = mp.write_error_analysis(result, repo_dir)
+        print(
+            f"  wrote {error_paths['fp_path']} ({error_paths['n_fp']} rows)\n"
+            f"  wrote {error_paths['fn_path']} ({error_paths['n_fn']} rows)"
+        )
+        print(
+            f"  (confusion matrix agrees: FP={cm['fp']}=={error_paths['n_fp']}, "
+            f"FN={cm['fn']}=={error_paths['n_fn']})"
+        )
+
         print("\nNext action — commit:")
         print(f"  cd {repo_dir}")
-        print("  git add docs/TEST_SET_RESULTS.md")
+        print("  git add docs/TEST_SET_RESULTS.md docs/error_analysis/")
         print(f'  git commit -m "Test set results: EER {eer_str}"')
-        print("  git push -u origin claude/ml-repo-structure-review-fpox8u")
+        print("  git push origin main")
         print(
             "\n  (git identity for this repo is Shruti <shruti@example.com> — "
             "verify with `git config --local --list | grep user` before "
-            "committing if you're in a fresh environment.)"
+            "committing if you're in a fresh environment. Push directly to "
+            "main, not a claude/* branch.)"
         )
         result["results_path"] = results_path
+        result["error_analysis_paths"] = error_paths
     else:
-        print("\nREHEARSAL run (--max-clips set) — no results file written, "
-              "no per_language_eer.json written. Not reportable.")
+        print("\nREHEARSAL run (--max-clips set) — no results file, "
+              "no per_language_eer.json, no error-analysis CSVs written. "
+              "Not reportable.")
 
     print("=" * 64)
     return result
