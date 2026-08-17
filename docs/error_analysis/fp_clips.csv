@@ -1,0 +1,6 @@
+clip_id,language,true_label,predicted_label,calibrated_p_fake,verdict
+train_manipurimale_06544,Manipuri,0,1,0.840379536151886,fake
+NEP_F_ALEXA_00009,Nepali,0,1,0.7697865962982178,fake
+NEP_F_DISGUST_00419,Nepali,0,1,0.765731930732727,fake
+NEP_F_SAD_00053,Nepali,0,1,0.6755377650260925,fake
+train_manipurimale_04038,Manipuri,0,1,0.5159369111061096,uncertain

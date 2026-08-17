@@ -1,6 +1,6 @@
 # Test Set Results — Model Pipeline
 
-_Generated 2026-08-17 09:36:29 by `evaluate_test_split.py`, via `model_pipeline.evaluate_dataset()`._
+_Generated 2026-08-17 09:47:27 by `evaluate_test_split.py`, via `model_pipeline.evaluate_dataset()`._
 
 **This is the frozen TEST split — the one Step 6 never touched during training or model selection. It should be evaluated exactly once, after every training/hyperparameter decision is final. If you are looking at this file wondering whether to go change something in Step 6 and re-run this — don't; that turns the test set into a second validation set.**
 
