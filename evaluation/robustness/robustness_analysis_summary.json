@@ -1,0 +1,44 @@
+{
+  "clean": {
+    "eer_percent": 1.0286,
+    "roc_auc": 0.9996,
+    "accuracy_percent": 96.3356
+  },
+  "opus_16kbps": {
+    "eer_percent": 3.664426051858717,
+    "roc_auc": 0.9942258430616298,
+    "accuracy_percent": 96.20700739312117,
+    "eer_increase_percentage_points": 2.635826051858717,
+    "roc_auc_drop": 0.005374156938370289,
+    "accuracy_drop_percentage_points": 0.12859260687882568,
+    "confusion_matrix": [
+      [
+        1476,
+        82
+      ],
+      [
+        36,
+        1517
+      ]
+    ]
+  },
+  "musan_10db": {
+    "eer_percent": 28.511754548527968,
+    "roc_auc": 0.7909355117884387,
+    "accuracy_percent": 71.68113146898104,
+    "eer_increase_percentage_points": 27.483154548527967,
+    "roc_auc_drop": 0.20866448821156136,
+    "accuracy_drop_percentage_points": 24.654468531018964,
+    "confusion_matrix": [
+      [
+        1214,
+        344
+      ],
+      [
+        537,
+        1016
+      ]
+    ]
+  },
+  "figures_directory": "/content/test_evaluation/robustness/figures"
+}
