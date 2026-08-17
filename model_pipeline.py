@@ -2475,15 +2475,19 @@ def train_model(
 # ============================================================================
 # SECTION 11 — Shared interface contract (Ashitha: PDF report generator + UI)
 # ============================================================================
-# PLACEHOLDER. The call signatures below are settled:
+#     analyze_bytes(audio_bytes) -> AnalysisResult      IMPLEMENTED
+#     evaluate_dataset(clip_ids, labels) -> dict        still a placeholder
 #
-#     analyze_bytes(audio_bytes) -> AnalysisResult
-#     evaluate_dataset(clip_ids, labels) -> dict
+# analyze_bytes is wired to the real trained head. Its AnalysisResult field set is
+# the one requested (verdict, confidence, detected_language, language_eer,
+# raw_score, audio_hash) but Ashitha has NOT confirmed the final dataclass — add
+# anything she needs to `metadata` rather than renaming the six fields, so her
+# side does not break silently.
 #
-# The AnalysisResult dataclass fields and the evaluate_dataset return schema are
-# still TBD — Ashitha is building the report generator and UI against them, so the
-# exact shape must come from her before this is filled in. Do not guess the fields;
-# a mismatch breaks her side silently.
+# Two values are deliberately absent rather than invented:
+#   * detected_language is "unknown" — there is no language classifier here.
+#   * language_eer is None until a per-language EER table exists AND a language
+#     is known. A fabricated per-language EER would flow straight into the PDF.
 #
 # Record any change to this section in docs/TEAM_SYNC_LOG.md under
 # "Interface changes".
@@ -2492,32 +2496,301 @@ def train_model(
 @dataclass
 class AnalysisResult:
     """
-    PLACEHOLDER — fields TBD, pending Ashitha's exact contract.
+    Result of analysing one audio clip.
 
-    Likely to include some form of: verdict/label, confidence or probability,
-    calibrated score, and the decision threshold used. Left deliberately empty
-    rather than guessed.
+    Field set is the one agreed for analyze_bytes. Ashitha has not confirmed the
+    final dataclass, so treat `metadata` as the escape hatch for anything she
+    needs added rather than renaming these.
+
+    Fields:
+        verdict: "real" | "uncertain" | "fake". See VERDICT_* thresholds.
+        confidence: probability of the reported class, in [0.5, 1.0] for a
+            decided verdict. For "uncertain" it is max(p_fake, 1 - p_fake), which
+            will be close to 0.5 by construction.
+        detected_language: ISO-ish language name, or "unknown". There is no
+            language classifier in this pipeline, so it is always "unknown"
+            unless a caller supplies a language hint.
+        language_eer: validation EER for the detected language, or None when the
+            language is unknown or no per-language table exists yet.
+        raw_score: the model's UNCALIBRATED logit. Higher = more fake.
+        audio_hash: sha256 of the exact input bytes, for provenance/dedup.
     """
 
-    # TODO(interface): replace with Ashitha's agreed fields.
-    raw: Dict[str, Any] = field(default_factory=dict)
+    verdict: str
+    confidence: float
+    detected_language: str
+    language_eer: Optional[float]
+    raw_score: float
+    audio_hash: str
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
-def analyze_bytes(audio_bytes: bytes) -> AnalysisResult:
+# --- Frozen decision thresholds -------------------------------------------
+# These operate on the CALIBRATED probability of "fake".
+#
+# Frozen defaults, chosen deliberately rather than derived, because a
+# validation-derived operating point is not yet available:
+#
+#   p_fake < 0.35            -> "real"
+#   0.35 <= p_fake <= 0.65   -> "uncertain"
+#   p_fake > 0.65            -> "fake"
+#
+# Rationale: a symmetric +/-0.15 band around 0.5. Both error directions cost the
+# same for this project (no asymmetric real-world penalty has been specified), and
+# an explicit abstain band matters more than a tuned cut for a demo/report UI —
+# it keeps borderline clips out of confident-looking claims.
+#
+# NOTE: step6_summary.json also carries `val_eer_threshold`. That threshold lives
+# in BONAFIDE-SCORE space (negated logits — see SCORE ORIENTATION in Section 9),
+# not calibrated-probability space, so it is deliberately NOT used here. Converting
+# it correctly is the right follow-up once real numbers exist.
+#
+# TODO(thresholds): re-derive from the validation set once Step 6 numbers land —
+# e.g. pick the band edges at target FAR/FRR rather than symmetric guesses.
+VERDICT_REAL_MAX_P_FAKE = 0.35
+VERDICT_FAKE_MIN_P_FAKE = 0.65
+
+# Optional per-language EER table, written by a later evaluation step.
+PER_LANGUAGE_EER_FILE = "per_language_eer.json"
+
+
+def verdict_from_p_fake(
+    p_fake: float,
+    real_max: float = VERDICT_REAL_MAX_P_FAKE,
+    fake_min: float = VERDICT_FAKE_MIN_P_FAKE,
+) -> str:
+    if p_fake < real_max:
+        return "real"
+    if p_fake > fake_min:
+        return "fake"
+    return "uncertain"
+
+
+def decode_audio_bytes(audio_bytes: bytes) -> Tuple[np.ndarray, int]:
     """
-    PLACEHOLDER — single-clip inference from raw audio bytes.
+    Decode arbitrary audio bytes (wav/flac/mp3/ogg) to a mono float32 array.
 
-    Intended flow once the contract lands:
-        1. decode bytes -> waveform, sample_rate
-        2. ensure_target_sample_rate(...)
-        3. extract_features(...)
-        4. load best checkpoint head, forward a batch of 1 (mask of ones)
-        5. apply the fitted TemperatureScaler
-        6. threshold at the validation-selected operating point
-        7. populate AnalysisResult
+    Tries soundfile, then torchaudio. Deliberately does NOT reuse decode_audio(),
+    which expects a torchcodec AudioDecoder from the HF dataset rather than raw
+    bytes.
     """
-    raise NotImplementedError(
-        "analyze_bytes is pending the shared interface contract with Ashitha."
+    import io
+
+    last_error: Optional[BaseException] = None
+
+    try:
+        import soundfile as sf
+
+        data, sr = sf.read(io.BytesIO(audio_bytes), dtype="float32", always_2d=False)
+        if getattr(data, "ndim", 1) > 1:
+            data = data.mean(axis=1)          # downmix to mono
+        return np.asarray(data, dtype=np.float32), int(sr)
+    except Exception as exc:  # noqa: BLE001
+        last_error = exc
+
+    try:
+        import torchaudio
+
+        waveform, sr = torchaudio.load(io.BytesIO(audio_bytes))
+        return waveform.mean(dim=0).numpy().astype(np.float32), int(sr)
+    except Exception as exc:  # noqa: BLE001
+        last_error = exc
+
+    raise RuntimeError(
+        "Could not decode the supplied audio bytes with soundfile or torchaudio. "
+        f"Last error: {type(last_error).__name__}: {last_error}"
+    )
+
+
+@dataclass
+class InferenceBundle:
+    """Everything needed to score a clip, loaded once and cached."""
+
+    head: AASISTHead
+    temperature: float
+    per_language_eer: Dict[str, float]
+    checkpoint_path: str
+    checkpoint_epoch: int
+    config: Dict[str, Any]
+    summary_path: Optional[str]
+
+
+# Module-level cache so repeated analyze_bytes() calls do not touch disk.
+_INFERENCE_BUNDLE: Optional[InferenceBundle] = None
+
+
+def load_inference_bundle(
+    checkpoint_dir: str = CHECKPOINT_DIR,
+    summary_path: Optional[str] = None,
+    force_reload: bool = False,
+) -> InferenceBundle:
+    """
+    Load the trained head, calibration temperature, and per-language EER table.
+
+    Cached at module level; subsequent calls return the same bundle. The frozen
+    frontend has its own cache in load_frontend(), so it is not reloaded either.
+    """
+    global _INFERENCE_BUNDLE
+
+    if _INFERENCE_BUNDLE is not None and not force_reload:
+        return _INFERENCE_BUNDLE
+
+    best_path = os.path.join(checkpoint_dir, "best_model.pt")
+    if not os.path.exists(best_path):
+        raise FileNotFoundError(
+            f"No trained checkpoint at {best_path}. Run Step 6 first "
+            "(model_pipeline.run_step6_resilient())."
+        )
+
+    ckpt = load_checkpoint(best_path)
+    head = ckpt["model"]
+    head.eval()
+
+    # Temperature: from step6_summary.json if present. 1.0 (no-op) otherwise, so
+    # inference degrades to uncalibrated rather than refusing to run.
+    if summary_path is None:
+        summary_path = os.path.join(checkpoint_dir, "step6_summary.json")
+
+    temperature = 1.0
+    resolved_summary: Optional[str] = None
+    if os.path.exists(summary_path):
+        with open(summary_path, "r", encoding="utf-8") as f:
+            summary = json.load(f)
+        temperature = float(summary.get("temperature", 1.0))
+        resolved_summary = summary_path
+        if temperature <= 0:
+            raise ValueError(
+                f"Invalid calibration temperature {temperature} in {summary_path}."
+            )
+    else:
+        print(
+            f"WARNING: {summary_path} not found — using temperature=1.0 "
+            "(uncalibrated). Confidence values will be less trustworthy."
+        )
+
+    # Per-language EER table, if a later evaluation step has produced one.
+    per_language_eer: Dict[str, float] = {}
+    lang_path = os.path.join(checkpoint_dir, PER_LANGUAGE_EER_FILE)
+    if os.path.exists(lang_path):
+        with open(lang_path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        per_language_eer = {str(k): float(v) for k, v in raw.items()}
+
+    _INFERENCE_BUNDLE = InferenceBundle(
+        head=head,
+        temperature=temperature,
+        per_language_eer=per_language_eer,
+        checkpoint_path=best_path,
+        checkpoint_epoch=int(ckpt.get("epoch", -1)),
+        config=ckpt.get("config", {}),
+        summary_path=resolved_summary,
+    )
+
+    print(
+        f"Inference bundle loaded: {best_path} (epoch "
+        f"{_INFERENCE_BUNDLE.checkpoint_epoch}), temperature="
+        f"{temperature:.4f}, per-language EER entries="
+        f"{len(per_language_eer)}"
+    )
+    return _INFERENCE_BUNDLE
+
+
+@torch.no_grad()
+def score_waveform(
+    waveform: np.ndarray,
+    sample_rate: int = TARGET_SAMPLE_RATE,
+    bundle: Optional[InferenceBundle] = None,
+) -> Tuple[float, float]:
+    """
+    Score one waveform. Returns (raw_logit, calibrated_p_fake).
+
+    Higher logit = more fake, matching the training target (1 = fake).
+    """
+    bundle = bundle or load_inference_bundle()
+
+    feats = extract_features(waveform, sampling_rate=sample_rate)
+    if feats.shape[0] == 0:
+        raise ValueError("Frontend produced zero frames — clip is too short.")
+
+    x = feats.unsqueeze(0).float().to(DEVICE)
+    mask = torch.ones(1, feats.shape[0], device=DEVICE)
+
+    logit = bundle.head(x, mask=mask)
+    raw_logit = float(logit.reshape(-1)[0].item())
+
+    calibrated = raw_logit / bundle.temperature
+    p_fake = 1.0 / (1.0 + float(np.exp(-calibrated)))
+
+    return raw_logit, p_fake
+
+
+def analyze_bytes(
+    audio_bytes: bytes,
+    language_hint: Optional[str] = None,
+    checkpoint_dir: str = CHECKPOINT_DIR,
+) -> AnalysisResult:
+    """
+    Analyse one clip from raw audio bytes.
+
+    Args:
+        audio_bytes: encoded audio (wav/flac/mp3/ogg).
+        language_hint: optional caller-supplied language. There is NO language
+            classifier in this pipeline, so detected_language is "unknown" unless
+            this is provided — nothing here guesses a language.
+
+    Returns a fully populated AnalysisResult.
+    """
+    import hashlib
+
+    audio_hash = hashlib.sha256(audio_bytes).hexdigest()
+
+    bundle = load_inference_bundle(checkpoint_dir=checkpoint_dir)
+
+    waveform, sr = decode_audio_bytes(audio_bytes)
+    duration_s = len(waveform) / sr if sr else 0.0
+
+    raw_logit, p_fake = score_waveform(waveform, sr, bundle=bundle)
+    verdict = verdict_from_p_fake(p_fake)
+
+    # Confidence in the reported class. For "uncertain" this sits near 0.5 by
+    # construction, which is the honest reading rather than a flattering one.
+    confidence = p_fake if verdict == "fake" else (
+        1.0 - p_fake if verdict == "real" else max(p_fake, 1.0 - p_fake)
+    )
+
+    # No classifier exists, so the language is unknown unless the caller says.
+    detected_language = language_hint or "unknown"
+
+    # TODO(language_eer): populate once a per-language EER table exists AND a
+    # language is known. Never synthesise a number here — a fabricated
+    # per-language EER would flow straight into Ashitha's PDF report.
+    language_eer: Optional[float] = None
+    if detected_language != "unknown" and bundle.per_language_eer:
+        language_eer = bundle.per_language_eer.get(detected_language)
+
+    return AnalysisResult(
+        verdict=verdict,
+        confidence=float(confidence),
+        detected_language=detected_language,
+        language_eer=language_eer,
+        raw_score=float(raw_logit),
+        audio_hash=audio_hash,
+        metadata={
+            "p_fake_calibrated": float(p_fake),
+            "temperature": bundle.temperature,
+            "thresholds": {
+                "real_max_p_fake": VERDICT_REAL_MAX_P_FAKE,
+                "fake_min_p_fake": VERDICT_FAKE_MIN_P_FAKE,
+            },
+            "duration_seconds": round(duration_s, 3),
+            "sample_rate_in": sr,
+            "frontend": FRONTEND_MODEL_NAME,
+            "checkpoint": os.path.basename(bundle.checkpoint_path),
+            "checkpoint_epoch": bundle.checkpoint_epoch,
+            "calibrated": bundle.summary_path is not None,
+            "language_source": "hint" if language_hint else "none",
+            "language_eer_available": bool(bundle.per_language_eer),
+        },
     )
 
 
