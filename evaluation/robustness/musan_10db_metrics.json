@@ -1,0 +1,17 @@
+{
+  "test_clips": 3111,
+  "real_clips": 1558,
+  "fake_clips": 1553,
+  "eer": 0.2851175454852797,
+  "eer_percent": 28.511754548527968,
+  "eer_threshold_bonafide_score": -0.6032737493515015,
+  "roc_auc": 0.7909355117884387,
+  "classification_threshold_logit": 2.1031923294067383,
+  "accuracy": 0.7168113146898103,
+  "accuracy_percent": 71.68113146898104,
+  "degradation": "musan_10db",
+  "successful_predictions": 3111,
+  "failures": 0,
+  "total_time_sec": 334.6444137096405,
+  "average_time_sec": 0.10756811755372565
+}
