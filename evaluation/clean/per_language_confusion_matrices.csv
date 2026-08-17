@@ -1,0 +1,17 @@
+language,true_real_pred_real,true_real_pred_fake,true_fake_pred_real,true_fake_pred_fake
+Assamese,100,0,0,100
+Bengali,90,0,0,90
+Bodo,101,0,0,99
+Dogri,100,0,0,100
+English,100,0,25,75
+Gujarati,78,0,20,58
+Hindi,100,0,15,85
+Kannada,100,0,11,89
+Malayalam,101,0,10,90
+Manipuri,100,0,7,93
+Marathi,101,0,2,98
+Nepali,100,0,3,97
+Odia,91,0,19,72
+Sanskrit,100,0,1,99
+Tamil,96,0,1,94
+Telugu,100,0,0,100
