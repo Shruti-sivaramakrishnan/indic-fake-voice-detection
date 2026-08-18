@@ -1,0 +1,17 @@
+# Forces Streamlit's OWN theme (native widget backgrounds/text -- file
+# uploader, expander, selectbox, json viewer, etc.) to a fixed light theme
+# regardless of the visitor's OS/browser dark-mode preference.
+#
+# This is the root-cause fix for a real bug: without this, Streamlit paints
+# several of its own structural containers with ITS dark-theme background
+# (near-black) when a visitor's browser prefers dark, while our own CSS
+# assumed a light page -- producing genuinely unreadable text in specific
+# native widgets under system dark mode. Confirmed via a real rendered-DOM
+# audit (Playwright + Chromium), not assumed.
+[theme]
+base = "light"
+primaryColor = "#1A1A1A"
+backgroundColor = "#FFFDF5"
+secondaryBackgroundColor = "#FFF3C4"
+textColor = "#1A1A1A"
+font = "sans-serif"

@@ -2,7 +2,7 @@
 2-screen Streamlit demo for the Indic fake-voice detector.
 
 Run:
-    pip install streamlit
+    pip install -r requirements.txt
     streamlit run app.py
 
 Screen 1 (landing) dramatizes the WhatsApp panic-call scam scenario. Screen 2
@@ -10,18 +10,29 @@ lets a user upload a clip and calls model_pipeline.analyze_bytes() for real
 inference -- no mock data anywhere in the result path.
 
 Design notes (see ui_kit.py for the fuller rationale):
-  * Palette + static widget theming (pill buttons, st.pills, alert cards) is
+  * Palette + static widget theming (pill buttons, alert cards, selectbox) is
     injected as CSS into the main document -- the only way to theme
-    Streamlit's real, interactive widgets.
-  * The landing illustration/dramatization, the hamster-wheel loader, and the
-    WhatsApp scroll-reveal card are self-contained HTML/CSS/JS rendered via
-    st.components.v1.html, since they need real keyframe animation that no
-    native Streamlit widget provides.
+    Streamlit's real, interactive widgets. .streamlit/config.toml forces
+    Streamlit's OWN theme to light regardless of the visitor's OS/browser
+    preference, since several native widgets otherwise paint themselves with
+    Streamlit's dark-theme background while this CSS assumes a light page --
+    confirmed as a real bug via a rendered-DOM audit, not assumed.
+  * The text-color invariant (dark bg -> light text, light bg -> dark text)
+    is enforced PER COMPONENT in ui_kit.BASE_STYLES, not by one global rule --
+    a blanket `p { color: black }` was found, by the same audit, to reach
+    inside a button and override its correctly-inherited white text. See the
+    long comment at the top of BASE_STYLES for the full explanation.
+  * The landing illustration/dramatization, the hamster-wheel loader, the
+    Live Call Companion illustration, and the WhatsApp/PDF scroll-reveal
+    cards are self-contained HTML/CSS/JS rendered via st.components.v1.html,
+    since they need real keyframe animation no native Streamlit widget
+    provides.
   * The language selector is a UI element only -- it is intentionally NOT
     passed into analyze_bytes() as a language_hint. There is no language
     classifier in the pipeline, and the spec calls for detected_language to
     show "unknown" as-is; wiring the selector into the hint would make that
-    field lie. A caption next to the selector says so explicitly.
+    field lie. The caption next to the selector says so explicitly, in
+    whichever language is currently selected.
 """
 
 from __future__ import annotations
@@ -29,7 +40,9 @@ from __future__ import annotations
 import streamlit as st
 import streamlit.components.v1 as components
 
+import i18n
 import ui_kit
+from i18n import t
 
 MODEL_IMPORT_ERROR: str | None = None
 try:
@@ -40,7 +53,7 @@ except Exception as exc:  # noqa: BLE001 -- surfaced as an amber card, not a cra
 
 
 st.set_page_config(
-    page_title="Voice Guard — Fake Voice Detector",
+    page_title="Voice Guard",
     page_icon="🛡️",
     layout="centered",
 )
@@ -51,7 +64,6 @@ st.session_state.setdefault("result", None)
 st.session_state.setdefault("result_error", None)
 st.session_state.setdefault("ui_language", "English")
 
-LANGUAGES = ["English", "Hindi", "Tamil", "Kannada"]
 ACCEPTED_TYPES = ["wav", "mp3", "flac", "ogg", "m4a"]
 
 
@@ -59,33 +71,63 @@ def go_to(screen: str) -> None:
     st.session_state.screen = screen
 
 
+def current_lang() -> str:
+    return st.session_state.get("ui_language", "English")
+
+
+def render_header(show_back: bool, show_next: bool) -> None:
+    """Persistent arrow-nav (prev/next between the app's two screens) plus
+    the language dropdown, top-right, on every screen."""
+    lang = current_lang()
+    col_back, _spacer, col_next, col_lang = st.columns([1, 4.4, 1, 2.2])
+
+    with col_back:
+        if st.button(
+            "←", type="tertiary", disabled=not show_back,
+            help=t("back_arrow_help", lang), key="nav_back",
+        ):
+            go_to("landing")
+            st.rerun()
+
+    with col_next:
+        if st.button(
+            "→", type="tertiary", disabled=not show_next,
+            help=t("next_arrow_help", lang), key="nav_next",
+        ):
+            go_to("analyze")
+            st.rerun()
+
+    with col_lang:
+        st.selectbox(
+            t("interface_language_label", lang),
+            i18n.LANGUAGES,
+            key="ui_language",
+            label_visibility="collapsed",
+        )
+
+
 # ============================================================================
-# SCREEN 1 — Landing
+# SCREEN 1 -- Landing
 # ============================================================================
 
 def render_landing() -> None:
+    lang = current_lang()
+    render_header(show_back=False, show_next=True)
+
     st.markdown(
-        "<h1 style='text-align:center; margin-bottom:0;'>🛡️ Voice Guard</h1>"
-        "<p class='subtle' style='text-align:center; font-size:1.05rem;'>"
-        "AI-generated voice detection for the calls that try to catch you off guard."
-        "</p>",
+        f"<h1 style='text-align:center; margin-bottom:0;'>🛡️ {t('app_title', lang)}</h1>"
+        f"<p class='subtle' style='text-align:center; font-size:1.05rem;'>"
+        f"{t('app_tagline', lang)}</p>",
         unsafe_allow_html=True,
     )
 
     components.html(ui_kit.landing_illustration_html(), height=300, scrolling=False)
 
     st.markdown(
-        """
+        f"""
         <div class="content-card" style="text-align:center;">
-          <p style="margin:0;">
-            <strong>It starts with a call.</strong> A voice that sounds exactly like
-            someone you trust — a relative, a friend — asking for money, urgently,
-            right now. It's a cloned voice built from a few seconds of audio.
-          </p>
-          <p style="margin-top:0.6rem;">
-            Voice Guard checks a recording in seconds and tells you whether it's
-            real or AI-generated, before you act on it.
-          </p>
+          <p style="margin:0;">{t('landing_p1', lang)}</p>
+          <p style="margin-top:0.6rem;">{t('landing_p2', lang)}</p>
         </div>
         """,
         unsafe_allow_html=True,
@@ -93,16 +135,16 @@ def render_landing() -> None:
 
     _, mid, _ = st.columns([1, 2, 1])
     with mid:
-        if st.button("Check a voice message →", type="primary", use_container_width=True):
+        if st.button(t("cta_button", lang), type="primary", use_container_width=True):
             go_to("analyze")
             st.rerun()
 
 
 # ============================================================================
-# SCREEN 2 — Upload & Analyze
+# SCREEN 2 -- Upload & Analyze
 # ============================================================================
 
-def run_analysis(audio_bytes: bytes):
+def run_analysis(audio_bytes: bytes, lang: str):
     """Wrap analyze_bytes so every failure mode lands as an amber card, never
     an unhandled Streamlit traceback."""
     if MODEL_IMPORT_ERROR:
@@ -115,91 +157,69 @@ def run_analysis(audio_bytes: bytes):
     return mp.analyze_bytes(audio_bytes)
 
 
-def render_result_card(result) -> None:
+def render_result_card(result, lang: str) -> None:
     verdict = result.verdict
     confidence_pct = f"{result.confidence * 100:.1f}%"
     lang_eer = (
         f"{result.language_eer * 100:.2f}%"
         if result.language_eer is not None
-        else "not available yet"
+        else t("lang_eer_unavailable", lang)
     )
     meta = (
-        f"Confidence: {confidence_pct} &nbsp;•&nbsp; "
-        f"Detected language: {result.detected_language} &nbsp;•&nbsp; "
-        f"Language EER: {lang_eer}"
+        f"{t('meta_confidence', lang)}: {confidence_pct} &nbsp;•&nbsp; "
+        f"{t('meta_detected_language', lang)}: {result.detected_language} &nbsp;•&nbsp; "
+        f"{t('meta_language_eer', lang)}: {lang_eer}"
     )
 
     if verdict == "real":
         html = ui_kit.alert_card(
-            "success", "✅ Likely Real",
-            "<p>This clip matches the acoustic pattern of a genuine human voice.</p>",
-            meta,
+            "success", f"✅ {t('verdict_real_title', lang)}",
+            f"<p>{t('verdict_real_body', lang)}</p>", meta,
         )
     elif verdict == "fake":
         html = ui_kit.alert_card(
-            "amber", "🚨 Likely Fake — AI-generated",
-            "<p>This clip shows patterns consistent with synthetic speech. "
-            "Treat any request made in it with caution.</p>",
-            meta,
+            "amber", f"\U0001f6a8 {t('verdict_fake_title', lang)}",
+            f"<p>{t('verdict_fake_body', lang)}</p>", meta,
         )
     elif verdict == "uncertain":
         html = ui_kit.alert_card(
-            "amber", "⚠️ Uncertain — inconclusive",
-            "<p>The model couldn't confidently call this real or fake. "
-            "Don't rely on this result alone — verify the caller another way.</p>",
-            meta,
+            "amber", f"⚠️ {t('verdict_uncertain_title', lang)}",
+            f"<p>{t('verdict_uncertain_body', lang)}</p>", meta,
         )
     else:  # defensive fallback for any future verdict value
         html = ui_kit.alert_card(
-            "amber", "⚠️ Unrecognized result",
-            f"<p>Got an unexpected verdict value: <code>{verdict}</code>.</p>",
-            meta,
+            "amber", f"⚠️ {t('verdict_unknown_title', lang)}",
+            f"<p>{verdict}</p>", meta,
         )
     st.markdown(html, unsafe_allow_html=True)
 
-    with st.expander("Technical details"):
+    with st.expander(t("technical_details", lang)):
         st.write(f"**Raw score (uncalibrated logit):** {result.raw_score:.4f}")
         st.write(f"**Audio hash (sha256):** `{result.audio_hash}`")
         st.json(result.metadata)
 
 
 def render_analyze() -> None:
-    if st.button("← Back", key="back_btn"):
-        go_to("landing")
-        st.rerun()
+    lang = current_lang()
+    render_header(show_back=True, show_next=False)
 
-    st.markdown("<h2>Upload a voice clip</h2>", unsafe_allow_html=True)
-
-    st.markdown(
-        "<p class='subtle' style='margin-bottom:0.3rem;'>Interface language</p>",
-        unsafe_allow_html=True,
-    )
-    st.pills(
-        "Interface language",
-        LANGUAGES,
-        default=st.session_state.ui_language,
-        key="ui_language",
-        label_visibility="collapsed",
-    )
-    st.caption(
-        "Full interface translation is coming soon — this selector doesn't "
-        "change analysis. It also isn't passed to the model: there is no "
-        "language classifier yet, so **detected language always reads "
-        "\"unknown\"** below, honestly."
-    )
+    st.markdown(f"<h2>{t('screen2_heading', lang)}</h2>", unsafe_allow_html=True)
+    st.caption(t("language_caption", lang))
 
     uploaded = st.file_uploader(
-        "Upload an audio clip", type=ACCEPTED_TYPES, label_visibility="collapsed"
+        t("upload_label", lang), type=ACCEPTED_TYPES, label_visibility="collapsed"
     )
 
-    submit = st.button("Analyze this clip", type="primary", use_container_width=True)
+    submit = st.button(
+        t("analyze_button", lang), type="primary", use_container_width=True
+    )
 
     if submit:
         if uploaded is None:
             st.markdown(
                 ui_kit.alert_card(
-                    "amber", "⚠️ No file selected",
-                    "<p>Upload an audio clip above before analyzing.</p>",
+                    "amber", f"⚠️ {t('no_file_title', lang)}",
+                    f"<p>{t('no_file_body', lang)}</p>",
                 ),
                 unsafe_allow_html=True,
             )
@@ -209,7 +229,7 @@ def render_analyze() -> None:
                 components.html(ui_kit.hamster_loader_html(), height=210, scrolling=False)
             try:
                 audio_bytes = uploaded.getvalue()
-                result = run_analysis(audio_bytes)
+                result = run_analysis(audio_bytes, lang)
                 st.session_state.result = result
                 st.session_state.result_error = None
             except Exception as exc:  # noqa: BLE001 -- shown as an amber card
@@ -220,35 +240,51 @@ def render_analyze() -> None:
     if st.session_state.result_error:
         st.markdown(
             ui_kit.alert_card(
-                "amber", "⚠️ Something went wrong",
+                "amber", f"⚠️ {t('error_title', lang)}",
                 f"<p>{st.session_state.result_error}</p>",
             ),
             unsafe_allow_html=True,
         )
     elif st.session_state.result is not None:
-        render_result_card(st.session_state.result)
+        render_result_card(st.session_state.result, lang)
 
-    st.markdown("<h3 style='margin-top:2rem;'>PDF Evidence Report</h3>", unsafe_allow_html=True)
     st.markdown(
-        '<div class="content-card">'
-        "<p style='margin:0;'>Generate a shareable PDF with the verdict, "
-        "confidence, and technical details for this clip."
-        '<span class="coming-soon-badge">Coming soon</span></p>'
-        "</div>",
+        f"<h3 style='margin-top:2rem;'>{t('pdf_heading', lang)}</h3>",
         unsafe_allow_html=True,
     )
-    st.button("📄 Generate PDF Evidence Report", disabled=True)
+    st.markdown(
+        f'<div class="content-card">'
+        f"<p style='margin:0;'>{t('pdf_body', lang)}"
+        f'<span class="coming-soon-badge">{t("coming_soon_badge", lang)}</span></p>'
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+    st.button(f"\U0001f4c4 {t('pdf_button', lang)}", disabled=True)
 
-    # Pushes the WhatsApp section below the fold so "appears on scroll" is real.
-    st.markdown("<div style='height:14vh;'></div>", unsafe_allow_html=True)
+    # Pushes the sections below the fold so "appears on scroll" is real.
+    st.markdown("<div style='height:12vh;'></div>", unsafe_allow_html=True)
 
-    st.markdown("<h3>Report scam calls directly</h3>", unsafe_allow_html=True)
+    st.markdown(f"<h3>{t('whatsapp_section_heading', lang)}</h3>", unsafe_allow_html=True)
     components.html(
         ui_kit.scroll_reveal_component(
-            "WhatsApp Bot",
-            "<p>Forward a suspicious voice note straight to our WhatsApp "
-            "number and get a verdict back in seconds — no need to open "
-            "this page.</p>",
+            t("whatsapp_title", lang),
+            f"<p>{t('whatsapp_body', lang)}</p>",
+            badge_text=t("coming_soon_badge", lang),
+            icon_svg=ui_kit.whatsapp_icon_svg(),
+        ),
+        height=180,
+        scrolling=False,
+    )
+
+    st.markdown("<div style='height:6vh;'></div>", unsafe_allow_html=True)
+
+    st.markdown(f"<h3>{t('live_call_section_heading', lang)}</h3>", unsafe_allow_html=True)
+    components.html(ui_kit.live_call_companion_html(), height=220, scrolling=False)
+    components.html(
+        ui_kit.scroll_reveal_component(
+            t("live_call_title", lang),
+            f"<p>{t('live_call_body', lang)}</p>",
+            badge_text=t("coming_soon_badge", lang),
         ),
         height=170,
         scrolling=False,

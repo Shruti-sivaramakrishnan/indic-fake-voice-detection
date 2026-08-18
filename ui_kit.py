@@ -81,21 +81,71 @@ html, body, [class*="css"] {
   font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
 }
 
-/* ---- headings / body text ------------------------------------------- */
-h1, h2, h3 { color: var(--black); font-weight: 800; letter-spacing: -0.01em; }
-p, li, label, .stMarkdown { color: var(--black); }
+/* ============================================================================
+   TEXT-COLOR INVARIANT: dark bg -> light text, light bg -> dark text, no
+   exceptions, enforced PER COMPONENT (not one global rule).
+
+   Why per-component: Streamlit wraps widget labels in nested markdown
+   containers (e.g. a button's visible text sits in a `<p>` several levels
+   inside the `<button>`). A single blanket rule like `p { color: black }`
+   directly matches THAT inner `<p>` too and overrides the button's correctly
+   INHERITED white text -- confirmed via a real rendered-DOM audit
+   (Playwright + Chromium): a `button[kind="primary"]` correctly had
+   `color: white` on itself, but its inner `<p>` showed `color: rgb(26,26,26)`
+   (black-on-black-background, i.e. invisible), entirely because of that one
+   overbroad rule. There is no blanket-selector fix for this: Streamlit reuses
+   the same markdown-wrapper structure everywhere, inside buttons and outside
+   them, so nothing about the WRAPPER distinguishes context.
+
+   The fix: set a single default at the top (inherited downward, not
+   re-matched by a bare tag selector), then for every component that needs a
+   DIFFERENT color, force it with `!important` on the component root AND
+   `* ` (all descendants) -- so it wins regardless of how many wrapper levels
+   Streamlit inserts.
+
+   `.streamlit/config.toml` also forces Streamlit's own theme to light, which
+   fixes a SEPARATE bug: several native widget containers (file uploader,
+   selectbox, expander) paint themselves with Streamlit's own dark-theme
+   background when the visitor's OS/browser prefers dark, while this CSS
+   assumes a light page -- also confirmed via the same audit, in dark
+   color-scheme specifically. Both fixes are needed; they cover different
+   failure modes.
+   ============================================================================ */
+
+/* ---- default: set once, inherited down, never re-matched by a bare tag */
+body, .stApp { color: var(--black); }
+h1, h2, h3, h4 { color: var(--black); font-weight: 800; letter-spacing: -0.01em; }
 .subtle { color: var(--text-muted-light); }
+
+/* Streamlit sets its own explicit color on these; force ours on every
+   descendant so it isn't left in a theme-dependent state. */
+[data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] * {
+  color: var(--text-muted-light) !important;
+}
+[data-testid="stExpander"] summary, [data-testid="stExpander"] summary * {
+  color: var(--black) !important;
+}
+[data-testid="stWidgetLabel"], [data-testid="stWidgetLabel"] * {
+  color: var(--black) !important;
+}
+[data-testid="stFileUploaderDropzoneInstructions"],
+[data-testid="stFileUploaderDropzoneInstructions"] * {
+  color: var(--text-muted-light) !important;
+}
 
 /* ---- primary pill buttons (CTA / Submit) ------------------------------
    Real st.button(type="primary"), reskinned. :hover/transition work exactly
    the same on injected CSS as anywhere else -- the "can't do this natively"
    limitation is about Streamlit exposing no animation API, not about CSS
    itself failing to apply. */
-div[data-testid="stButton"] button[kind="primary"] {
+[data-testid="stButton"] button[kind="primary"],
+[data-testid="stButton"] button[kind="primary"] * {
+  color: var(--white) !important;
+}
+[data-testid="stButton"] button[kind="primary"] {
   position: relative;
   overflow: hidden;
   background: var(--black) !important;
-  color: var(--white) !important;
   border: none !important;
   border-radius: 999px !important;
   padding: 0.7em 2.2em !important;
@@ -105,7 +155,7 @@ div[data-testid="stButton"] button[kind="primary"] {
   box-shadow: 0 2px 0 rgba(26,26,26,0.15);
   transition: transform 0.15s ease, box-shadow 0.15s ease;
 }
-div[data-testid="stButton"] button[kind="primary"]::after {
+[data-testid="stButton"] button[kind="primary"]::after {
   content: "";
   position: absolute;
   top: 0; left: -60%;
@@ -114,45 +164,104 @@ div[data-testid="stButton"] button[kind="primary"]::after {
   transform: skewX(-20deg);
   transition: left 0.55s ease;
 }
-div[data-testid="stButton"] button[kind="primary"]:hover {
+[data-testid="stButton"] button[kind="primary"]:hover {
   transform: translateY(-1px);
   box-shadow: 0 4px 0 rgba(26,26,26,0.18);
 }
-div[data-testid="stButton"] button[kind="primary"]:hover::after { left: 120%; }
-div[data-testid="stButton"] button[kind="primary"]:active { transform: translateY(0); }
+[data-testid="stButton"] button[kind="primary"]:hover::after { left: 120%; }
+[data-testid="stButton"] button[kind="primary"]:active { transform: translateY(0); }
 
-/* ---- disabled "coming soon" buttons ---------------------------------- */
-div[data-testid="stButton"] button:disabled {
-  background: var(--bg-yellow-soft) !important;
+/* ---- tertiary buttons: the small circular arrow-nav controls ---------- */
+[data-testid="stButton"] button[kind="tertiary"],
+[data-testid="stButton"] button[kind="tertiary"] * {
+  color: var(--black) !important;
+}
+[data-testid="stButton"] button[kind="tertiary"] {
+  background: var(--white) !important;
+  border: 2px solid var(--black) !important;
+  border-radius: 999px !important;
+  min-width: 2.6em !important;
+  height: 2.6em !important;
+  padding: 0 !important;
+  font-size: 1.25rem !important;
+  font-weight: 700 !important;
+  line-height: 1 !important;
+  transition: background 0.15s ease, transform 0.15s ease;
+}
+[data-testid="stButton"] button[kind="tertiary"]:hover:not(:disabled) {
+  background: var(--bg-yellow) !important;
+  transform: translateY(-1px);
+}
+[data-testid="stButton"] button[kind="tertiary"]:disabled,
+[data-testid="stButton"] button[kind="tertiary"]:disabled * {
   color: var(--text-muted-yellow) !important;
+  opacity: 1 !important;
+}
+[data-testid="stButton"] button[kind="tertiary"]:disabled {
+  background: var(--bg-cream) !important;
+  border-color: var(--text-muted-yellow) !important;
+}
+
+/* ---- disabled "coming soon" buttons ------------------------------------ */
+[data-testid="stButton"] button[kind="secondary"]:disabled,
+[data-testid="stButton"] button[kind="secondary"]:disabled * {
+  color: var(--text-muted-yellow) !important;
+}
+[data-testid="stButton"] button[kind="secondary"]:disabled {
+  background: var(--bg-yellow-soft) !important;
   border: 1.5px dashed var(--text-muted-yellow) !important;
   border-radius: 999px !important;
   opacity: 1 !important;
   font-weight: 600 !important;
 }
 
-/* ---- st.pills language selector --------------------------------------- */
-div[data-testid="stPills"] [data-baseweb="tag"],
-div[data-testid="stPills"] button {
-  border-radius: 999px !important;
-  border: 1.5px solid var(--black) !important;
-  background: var(--white) !important;
+/* ---- language dropdown (st.selectbox), top-right ----------------------- */
+[data-testid="stSelectbox"] label, [data-testid="stSelectbox"] label * {
   color: var(--black) !important;
-  font-weight: 600 !important;
 }
-div[data-testid="stPills"] button[aria-pressed="true"] {
-  background: var(--black) !important;
-  color: var(--white) !important;
+[data-testid="stSelectbox"] [data-baseweb="select"],
+[data-testid="stSelectbox"] [data-baseweb="select"] * {
+  color: var(--black) !important;
+}
+[data-testid="stSelectbox"] [data-baseweb="select"] > div {
+  background: var(--white) !important;
+  border: 1.5px solid var(--black) !important;
+  border-radius: 999px !important;
+}
+/* the open dropdown menu is portaled to <body>, styled separately below */
+ul[data-testid="stSelectboxVirtualDropdown"],
+ul[data-testid="stSelectboxVirtualDropdown"] * {
+  color: var(--black) !important;
+  background: var(--white) !important;
+}
+li[data-testid="stSelectboxVirtualDropdown"]:hover,
+ul[data-testid="stSelectboxVirtualDropdown"] li:hover {
+  background: var(--bg-yellow-soft) !important;
 }
 
-/* ---- file uploader ------------------------------------------------------ */
-div[data-testid="stFileUploaderDropzone"] {
+/* ---- file uploader ------------------------------------------------------
+   Note: the dropzone is a <section>, not a <div> -- an earlier version of
+   this rule was scoped to `div[data-testid=...]` and silently never matched
+   anything. Bare `[data-testid=...]` (no tag prefix) is used throughout this
+   file now specifically to avoid repeating that mistake. */
+[data-testid="stFileUploaderDropzone"] {
   background: var(--white) !important;
   border: 2px dashed var(--black) !important;
   border-radius: 18px !important;
 }
+[data-testid="stFileUploaderDropzone"] button[kind="secondary"] {
+  background: var(--bg-yellow) !important;
+  border: none !important;
+}
+[data-testid="stFileUploaderDropzone"] button[kind="secondary"],
+[data-testid="stFileUploaderDropzone"] button[kind="secondary"] * {
+  color: var(--black) !important;
+}
 
-/* ---- alert cards -------------------------------------------------------- */
+/* ---- alert cards --------------------------------------------------------
+   Own static HTML (authored directly, not Streamlit-wrapped) but still
+   forced with !important + descendant selector -- cheap insurance against
+   any future global rule (including this file's own) reaching in. */
 .alert-card {
   border-radius: 16px;
   padding: 1.1rem 1.4rem;
@@ -161,21 +270,18 @@ div[data-testid="stFileUploaderDropzone"] {
 }
 .alert-card h4 { margin: 0 0 0.35rem 0; font-size: 1.15rem; }
 .alert-card p { margin: 0.15rem 0; }
-.alert-card .meta { font-size: 0.92rem; color: var(--text-muted-light); }
-.alert-card.success {
-  background: var(--success-bg);
-  border-color: var(--success-border);
-  color: var(--success-text);
+.alert-card .meta { font-size: 0.92rem; }
+.alert-card.success, .alert-card.success * {
+  color: var(--success-text) !important;
 }
-.alert-card.success h4 { color: var(--success-text); }
-.alert-card.amber {
-  background: var(--amber-bg);
-  border-color: var(--amber-border);
-  color: var(--amber-text);
+.alert-card.success { background: var(--success-bg); border-color: var(--success-border); }
+.alert-card.amber, .alert-card.amber * {
+  color: var(--amber-text) !important;
 }
-.alert-card.amber h4 { color: var(--amber-text); }
+.alert-card.amber { background: var(--amber-bg); border-color: var(--amber-border); }
 
-/* ---- generic content card (PDF report, section wrappers) -------------- */
+/* ---- generic content card (PDF report, section wrappers) --------------- */
+.content-card, .content-card * { color: var(--black) !important; }
 .content-card {
   background: var(--white);
   border: 1.5px solid var(--bg-yellow);
@@ -186,7 +292,7 @@ div[data-testid="stFileUploaderDropzone"] {
 .coming-soon-badge {
   display: inline-block;
   background: var(--bg-yellow);
-  color: var(--black);
+  color: var(--black) !important;
   font-size: 0.75rem;
   font-weight: 700;
   padding: 0.15em 0.7em;
@@ -194,6 +300,9 @@ div[data-testid="stFileUploaderDropzone"] {
   margin-left: 0.5em;
   vertical-align: middle;
 }
+
+/* ---- header row: back/next arrows + language dropdown ------------------ */
+.nav-spacer { height: 0.2rem; }
 """
 
 
@@ -407,10 +516,28 @@ svg {{ width:130px; height:130px; }}
 </div></body></html>"""
 
 
+def whatsapp_icon_svg(size: int = 56) -> str:
+    """
+    Generic chat-bubble + phone glyph, flat line-art, consistent with the
+    illustration style used elsewhere. Deliberately not a literal WhatsApp
+    logo -- a shape that reads as "messaging", nothing brand-specific.
+    """
+    return f"""<svg width="{size}" height="{size}" viewBox="0 0 64 64" fill="none"
+      xmlns="http://www.w3.org/2000/svg" style="flex-shrink:0;">
+  <circle cx="32" cy="32" r="30" fill="var(--bg-yellow-soft)"/>
+  <path d="M20 22h20a4 4 0 0 1 4 4v10a4 4 0 0 1-4 4H28l-8 6v-6a4 4 0 0 1-4-4V26a4 4 0 0 1 4-4Z"
+        fill="var(--white)" stroke="var(--black)" stroke-width="3" stroke-linejoin="round"/>
+  <circle cx="26" cy="30" r="2" fill="var(--black)"/>
+  <circle cx="32" cy="30" r="2" fill="var(--black)"/>
+  <circle cx="38" cy="30" r="2" fill="var(--black)"/>
+</svg>"""
+
+
 def scroll_reveal_component(
     title: str,
     body_html: str,
     badge_text: str = "Coming soon",
+    icon_svg: str = "",
 ) -> str:
     """
     A card that fades/slides into place once the surrounding iframe scrolls
@@ -423,6 +550,7 @@ def scroll_reveal_component(
     starts partially visible (opacity 0.55, not 0) rather than fully hidden,
     so it degrades to "visible but not animated" instead of "invisible."
     """
+    icon_html = f'<div class="icon">{icon_svg}</div>' if icon_svg else ""
     return f"""<!doctype html><html><head><meta charset="utf-8"><style>
 {CSS_VARS_BLOCK}
 html,body {{ margin:0; padding:0; background:transparent;
@@ -436,8 +564,13 @@ html,body {{ margin:0; padding:0; background:transparent;
   transform: translateY(14px);
   transition: opacity 0.6s ease, transform 0.6s ease;
   box-sizing: border-box;
+  display: flex;
+  align-items: flex-start;
+  gap: 0.9rem;
 }}
 .card.visible {{ opacity: 1; transform: translateY(0); }}
+.card .icon {{ flex-shrink: 0; }}
+.card .text {{ flex: 1; min-width: 0; }}
 .card h4 {{ margin: 0 0 0.4rem 0; color: var(--black); font-size: 1.1rem; }}
 .card p {{ margin: 0.2rem 0; color: var(--black); }}
 .badge {{
@@ -448,8 +581,11 @@ html,body {{ margin:0; padding:0; background:transparent;
 </style></head>
 <body>
 <div class="card" id="card">
-  <h4>{title}<span class="badge">{badge_text}</span></h4>
-  {body_html}
+  {icon_html}
+  <div class="text">
+    <h4>{title}<span class="badge">{badge_text}</span></h4>
+    {body_html}
+  </div>
 </div>
 <script>
   var card = document.getElementById('card');
@@ -473,3 +609,84 @@ html,body {{ margin:0; padding:0; background:transparent;
   setInterval(checkVisible, 500);
 </script>
 </body></html>"""
+
+
+def live_call_companion_html() -> str:
+    """
+    Flat line-art figure waiting mid-call: idle stand -> checks a wrist watch
+    -> shoulders drop in a sigh, with a small breath-wisp cue -> settles ->
+    loops. Same synced-master-timeline technique as landing_illustration_html
+    (all elements share one animation-duration with percentage keyframe
+    offsets), just a shorter ~5s cycle since this is one continuous mood
+    rather than a multi-beat story.
+    """
+    return f"""<!doctype html><html><head><meta charset="utf-8"><style>
+{CSS_VARS_BLOCK}
+html,body {{ margin:0; padding:0; background:transparent; overflow:hidden; }}
+.wrap {{ display:flex; justify-content:center; align-items:center; height:100%; }}
+svg {{ width:100%; max-width:220px; height:auto; display:block; }}
+
+@keyframes idle-bob {{
+  0%, 100% {{ transform: translateY(0); }}
+  50%      {{ transform: translateY(-2px); }}
+}}
+#figure {{ animation: idle-bob 2.4s ease-in-out infinite; transform-origin: 110px 230px; }}
+
+/* master timeline (shared by arm-raise / shoulder-slump / sigh-window below):
+   0-40% idle wait, 40-58% arm raises to check watch, 58-72% shoulders drop /
+   sigh, 72-100% settle back to idle */
+@keyframes arm-raise {{
+  0%, 38%   {{ transform: rotate(0deg); }}
+  46%, 56%  {{ transform: rotate(-58deg); }}
+  64%, 100% {{ transform: rotate(0deg); }}
+}}
+#arm-watch {{ animation: arm-raise 5s ease-in-out infinite; transform-origin: 130px 168px; }}
+
+@keyframes shoulder-slump {{
+  0%, 56%   {{ transform: translateY(0); }}
+  66%, 88%  {{ transform: translateY(4px); }}
+  100%      {{ transform: translateY(0); }}
+}}
+#shoulders {{ animation: shoulder-slump 5s ease-in-out infinite; }}
+
+@keyframes sigh-window {{
+  0%, 60%   {{ opacity: 0; transform: translateY(0); }}
+  66%       {{ opacity: 0.9; transform: translateY(-2px); }}
+  85%       {{ opacity: 0; transform: translateY(-14px); }}
+  100%      {{ opacity: 0; transform: translateY(0); }}
+}}
+#sigh {{ animation: sigh-window 5s ease-out infinite; }}
+</style></head>
+<body><div class="wrap">
+<svg viewBox="0 0 220 260" fill="none" xmlns="http://www.w3.org/2000/svg">
+
+  <g id="figure" stroke="var(--black)" stroke-width="4" stroke-linecap="round" stroke-linejoin="round">
+    <!-- legs / base -->
+    <path d="M92 230 L88 200 M128 230 L132 200" fill="none"/>
+    <!-- torso -->
+    <g id="shoulders">
+      <rect x="86" y="130" width="48" height="80" rx="20" fill="var(--bg-yellow-soft)"/>
+    </g>
+    <!-- static arm, resting -->
+    <path d="M92 140 Q78 165 84 190" fill="none"/>
+    <!-- arm that raises to check the watch -->
+    <g id="arm-watch">
+      <path d="M128 140 Q142 155 132 168" fill="none"/>
+      <circle cx="132" cy="168" r="6" fill="var(--white)" stroke="var(--black)" stroke-width="2.5"/>
+      <line x1="132" y1="164" x2="132" y2="168" stroke-width="1.8"/>
+      <line x1="132" y1="168" x2="135" y2="168" stroke-width="1.8"/>
+    </g>
+    <!-- head -->
+    <circle cx="110" cy="104" r="26" fill="var(--bg-yellow)"/>
+    <!-- calm-tired face -->
+    <path d="M98 104 Q103 108 108 104" fill="none" stroke-width="3"/>
+    <path d="M112 104 Q117 108 122 104" fill="none" stroke-width="3"/>
+    <path d="M100 118 Q110 114 120 118" fill="none" stroke-width="3"/>
+  </g>
+
+  <!-- breath / sigh wisp -->
+  <g id="sigh" stroke="var(--black)" stroke-width="2.5" fill="none" stroke-linecap="round">
+    <path d="M132 96 Q140 90 136 82 Q132 76 138 70"/>
+  </g>
+</svg>
+</div></body></html>"""
