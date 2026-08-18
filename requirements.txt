@@ -1,0 +1,14 @@
+# Streamlit demo (app.py) + the model_pipeline.py inference path it calls
+# (analyze_bytes -> frozen frontend -> AASIST head).
+#
+# NOT included here: `datasets` and `scikit-learn`, which model_pipeline.py
+# only imports lazily inside the training/evaluation functions (streaming,
+# EER) that the demo app never calls. Install them separately if you're also
+# running evaluate_test_split.py or Step 6 training in this environment.
+
+streamlit>=1.36          # st.pills requires >=1.36
+torch>=2.0
+transformers>=4.30
+numpy
+soundfile                # primary audio decode path in decode_audio_bytes()
+torchaudio                # resampling fallback + non-wav decode fallback
