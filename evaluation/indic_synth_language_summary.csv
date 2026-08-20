@@ -1,0 +1,11 @@
+language,total,detected_fake,recall
+Bengali,40,40,1.0
+Gujarati,40,40,1.0
+Hindi,40,40,1.0
+Kannada,40,40,1.0
+Malayalam,40,40,1.0
+Marathi,40,40,1.0
+Odia,40,40,1.0
+Sanskrit,40,40,1.0
+Tamil,40,40,1.0
+Telugu,40,40,1.0
