@@ -36,6 +36,10 @@ Design notes (see ui_kit.py for the fuller rationale):
 """
 
 from __future__ import annotations
+
+import truststore
+truststore.inject_into_ssl()
+
 import evidence_report
 
 import streamlit as st
@@ -46,6 +50,7 @@ import ui_kit
 from i18n import t
 
 MODEL_IMPORT_ERROR: str | None = None
+
 try:
     import model_pipeline as mp
 except Exception as exc:  # noqa: BLE001 -- surfaced as an amber card, not a crash
@@ -58,7 +63,11 @@ st.set_page_config(
     page_icon="🛡️",
     layout="centered",
 )
-st.markdown(f"<style>{ui_kit.BASE_STYLES}</style>", unsafe_allow_html=True)
+
+st.markdown(
+    f"<style>{ui_kit.BASE_STYLES}</style>",
+    unsafe_allow_html=True,
+)
 
 st.session_state.setdefault("screen", "landing")
 st.session_state.setdefault("result", None)
@@ -84,16 +93,22 @@ def render_header(show_back: bool, show_next: bool) -> None:
 
     with col_back:
         if st.button(
-            "←", type="tertiary", disabled=not show_back,
-            help=t("back_arrow_help", lang), key="nav_back",
+            "←",
+            type="tertiary",
+            disabled=not show_back,
+            help=t("back_arrow_help", lang),
+            key="nav_back",
         ):
             go_to("landing")
             st.rerun()
 
     with col_next:
         if st.button(
-            "→", type="tertiary", disabled=not show_next,
-            help=t("next_arrow_help", lang), key="nav_next",
+            "→",
+            type="tertiary",
+            disabled=not show_next,
+            help=t("next_arrow_help", lang),
+            key="nav_next",
         ):
             go_to("analyze")
             st.rerun()
@@ -116,13 +131,18 @@ def render_landing() -> None:
     render_header(show_back=False, show_next=True)
 
     st.markdown(
-        f"<h1 style='text-align:center; margin-bottom:0;'>🛡️ {t('app_title', lang)}</h1>"
+        f"<h1 style='text-align:center; margin-bottom:0;'>🛡️ "
+        f"{t('app_title', lang)}</h1>"
         f"<p class='subtle' style='text-align:center; font-size:1.05rem;'>"
         f"{t('app_tagline', lang)}</p>",
         unsafe_allow_html=True,
     )
 
-    components.html(ui_kit.landing_illustration_html(), height=300, scrolling=False)
+    components.html(
+        ui_kit.landing_illustration_html(),
+        height=300,
+        scrolling=False,
+    )
 
     st.markdown(
         f"""
@@ -135,8 +155,13 @@ def render_landing() -> None:
     )
 
     _, mid, _ = st.columns([1, 2, 1])
+
     with mid:
-        if st.button(t("cta_button", lang), type="primary", use_container_width=True):
+        if st.button(
+            t("cta_button", lang),
+            type="primary",
+            use_container_width=True,
+        ):
             go_to("analyze")
             st.rerun()
 
@@ -154,108 +179,169 @@ def run_analysis(audio_bytes: bytes, lang: str):
             "This demo needs model_pipeline.py's dependencies (torch, "
             "transformers, etc.) installed and checkpoints/best_model.pt present."
         )
+
     # Deliberately no language_hint -- see module docstring.
     return mp.analyze_bytes(audio_bytes)
 
 
 def render_result_card(result, lang: str) -> None:
     verdict = result.verdict
+
     confidence_pct = f"{result.confidence * 100:.1f}%"
+
     lang_eer = (
         f"{result.language_eer * 100:.2f}%"
         if result.language_eer is not None
         else t("lang_eer_unavailable", lang)
     )
+
     meta = (
         f"{t('meta_confidence', lang)}: {confidence_pct} &nbsp;•&nbsp; "
-        f"{t('meta_detected_language', lang)}: {result.detected_language} &nbsp;•&nbsp; "
+        f"{t('meta_detected_language', lang)}: "
+        f"{result.detected_language} &nbsp;•&nbsp; "
         f"{t('meta_language_eer', lang)}: {lang_eer}"
     )
 
     if verdict == "real":
         html = ui_kit.alert_card(
-            "success", f"✅ {t('verdict_real_title', lang)}",
-            f"<p>{t('verdict_real_body', lang)}</p>", meta,
+            "success",
+            f"✅ {t('verdict_real_title', lang)}",
+            f"<p>{t('verdict_real_body', lang)}</p>",
+            meta,
         )
+
     elif verdict == "fake":
         html = ui_kit.alert_card(
-            "amber", f"\U0001f6a8 {t('verdict_fake_title', lang)}",
-            f"<p>{t('verdict_fake_body', lang)}</p>", meta,
+            "amber",
+            f"\U0001f6a8 {t('verdict_fake_title', lang)}",
+            f"<p>{t('verdict_fake_body', lang)}</p>",
+            meta,
         )
+
     elif verdict == "uncertain":
         html = ui_kit.alert_card(
-            "amber", f"⚠️ {t('verdict_uncertain_title', lang)}",
-            f"<p>{t('verdict_uncertain_body', lang)}</p>", meta,
+            "amber",
+            f"⚠️ {t('verdict_uncertain_title', lang)}",
+            f"<p>{t('verdict_uncertain_body', lang)}</p>",
+            meta,
         )
-    else:  # defensive fallback for any future verdict value
+
+    else:
         html = ui_kit.alert_card(
-            "amber", f"⚠️ {t('verdict_unknown_title', lang)}",
-            f"<p>{verdict}</p>", meta,
+            "amber",
+            f"⚠️ {t('verdict_unknown_title', lang)}",
+            f"<p>{verdict}</p>",
+            meta,
         )
+
     st.markdown(html, unsafe_allow_html=True)
 
     with st.expander(t("technical_details", lang)):
-        st.write(f"**Raw score (uncalibrated logit):** {result.raw_score:.4f}")
-        st.write(f"**Audio hash (sha256):** `{result.audio_hash}`")
+        st.write(
+            f"**Raw score (uncalibrated logit):** "
+            f"{result.raw_score:.4f}"
+        )
+        st.write(
+            f"**Audio hash (sha256):** `{result.audio_hash}`"
+        )
         st.json(result.metadata)
 
 
 def render_analyze() -> None:
     lang = current_lang()
+
     render_header(show_back=True, show_next=False)
 
-    st.markdown(f"<h2>{t('screen2_heading', lang)}</h2>", unsafe_allow_html=True)
+    st.markdown(
+        f"<h2>{t('screen2_heading', lang)}</h2>",
+        unsafe_allow_html=True,
+    )
+
     st.caption(t("language_caption", lang))
 
     uploaded = st.file_uploader(
-        t("upload_label", lang), type=ACCEPTED_TYPES, label_visibility="collapsed"
+        t("upload_label", lang),
+        type=ACCEPTED_TYPES,
+        label_visibility="collapsed",
     )
 
     submit = st.button(
-        t("analyze_button", lang), type="primary", use_container_width=True
+        t("analyze_button", lang),
+        type="primary",
+        use_container_width=True,
     )
 
     if submit:
+
         if uploaded is None:
             st.markdown(
                 ui_kit.alert_card(
-                    "amber", f"⚠️ {t('no_file_title', lang)}",
+                    "amber",
+                    f"⚠️ {t('no_file_title', lang)}",
                     f"<p>{t('no_file_body', lang)}</p>",
                 ),
                 unsafe_allow_html=True,
             )
+
         else:
             loader_slot = st.empty()
+
             with loader_slot:
-                components.html(ui_kit.hamster_loader_html(), height=210, scrolling=False)
+                components.html(
+                    ui_kit.hamster_loader_html(),
+                    height=210,
+                    scrolling=False,
+                )
+
             try:
                 audio_bytes = uploaded.getvalue()
+
                 st.session_state.audio_filename = uploaded.name
-                result = run_analysis(audio_bytes, lang)
+
+                result = run_analysis(
+                    audio_bytes,
+                    lang,
+                )
+
                 st.session_state.result = result
                 st.session_state.result_error = None
-            except Exception as exc:  # noqa: BLE001 -- shown as an amber card
+
+            except Exception as exc:
                 st.session_state.result = None
                 st.session_state.result_error = str(exc)
+
             loader_slot.empty()
 
     if st.session_state.result_error:
+
         st.markdown(
             ui_kit.alert_card(
-                "amber", f"⚠️ {t('error_title', lang)}",
+                "amber",
+                f"⚠️ {t('error_title', lang)}",
                 f"<p>{st.session_state.result_error}</p>",
             ),
             unsafe_allow_html=True,
         )
+
     elif st.session_state.result is not None:
-        render_result_card(st.session_state.result, lang)
+
+        render_result_card(
+            st.session_state.result,
+            lang,
+        )
+
+    # =========================================================================
+    # PDF EVIDENCE REPORT
+    # =========================================================================
 
     st.markdown(
-        f"<h3 style='margin-top:2rem;'>{t('pdf_heading', lang)}</h3>",
+        f"<h3 style='margin-top:2rem;'>"
+        f"{t('pdf_heading', lang)}</h3>",
         unsafe_allow_html=True,
     )
 
     if st.session_state.result is not None:
+
         st.markdown(
             '<div class="content-card">'
             '<p style="margin:0;">'
@@ -265,9 +351,13 @@ def render_analyze() -> None:
         )
 
         try:
+
             report_pdf = evidence_report.generate_evidence_report(
                 st.session_state.result,
-                st.session_state.get("audio_filename", "uploaded_audio"),
+                st.session_state.get(
+                    "audio_filename",
+                    "uploaded_audio",
+                ),
             )
 
             st.download_button(
@@ -280,14 +370,28 @@ def render_analyze() -> None:
             )
 
         except Exception as exc:
-            st.error(f"Could not generate the Evidence Report: {exc}")
+
+            st.error(
+                f"Could not generate the Evidence Report: {exc}"
+            )
+
     else:
-        st.info("Analyze an audio file first to generate the Evidence Report.")
+
+        st.info(
+            "Analyze an audio file first to generate the Evidence Report."
+        )
 
     # Pushes the sections below the fold so "appears on scroll" is real.
-    st.markdown("<div style='height:12vh;'></div>", unsafe_allow_html=True)
+    st.markdown(
+        "<div style='height:12vh;'></div>",
+        unsafe_allow_html=True,
+    )
 
-    st.markdown(f"<h3>{t('whatsapp_section_heading', lang)}</h3>", unsafe_allow_html=True)
+    st.markdown(
+        f"<h3>{t('whatsapp_section_heading', lang)}</h3>",
+        unsafe_allow_html=True,
+    )
+
     components.html(
         ui_kit.scroll_reveal_component(
             t("whatsapp_title", lang),
@@ -299,10 +403,22 @@ def render_analyze() -> None:
         scrolling=False,
     )
 
-    st.markdown("<div style='height:6vh;'></div>", unsafe_allow_html=True)
+    st.markdown(
+        "<div style='height:6vh;'></div>",
+        unsafe_allow_html=True,
+    )
 
-    st.markdown(f"<h3>{t('live_call_section_heading', lang)}</h3>", unsafe_allow_html=True)
-    components.html(ui_kit.live_call_companion_html(), height=220, scrolling=False)
+    st.markdown(
+        f"<h3>{t('live_call_section_heading', lang)}</h3>",
+        unsafe_allow_html=True,
+    )
+
+    components.html(
+        ui_kit.live_call_companion_html(),
+        height=220,
+        scrolling=False,
+    )
+
     components.html(
         ui_kit.scroll_reveal_component(
             t("live_call_title", lang),
