@@ -2657,6 +2657,8 @@ def load_language_id_model(model_name: str = "facebook/mms-lid-126") -> Tuple[An
     Load the MMS language identification model. Cached after first call.
 
     Returns (model, processor).
+
+    On Kaggle/Colab, sets appropriate cache dir and handles model download robustly.
     """
     global _LANGUAGE_ID_MODEL, _LANGUAGE_ID_PROCESSOR
 
@@ -2664,18 +2666,39 @@ def load_language_id_model(model_name: str = "facebook/mms-lid-126") -> Tuple[An
         return _LANGUAGE_ID_MODEL, _LANGUAGE_ID_PROCESSOR
 
     try:
+        import os as os_module
         from transformers import AutoModelForAudioClassification, AutoProcessor
 
-        processor = AutoProcessor.from_pretrained(model_name)
-        model = AutoModelForAudioClassification.from_pretrained(model_name)
+        # Ensure huggingface cache is writable (critical on Kaggle)
+        cache_dir = os_module.path.expanduser("~/.cache/huggingface/hub")
+        os_module.makedirs(cache_dir, exist_ok=True)
+
+        # Load processor first with explicit error checking
+        processor = AutoProcessor.from_pretrained(
+            model_name,
+            trust_remote_code=False,
+            cache_dir=cache_dir,
+        )
+        if processor is None:
+            raise RuntimeError(f"AutoProcessor.from_pretrained returned None for {model_name}")
+
+        # Load model with explicit error checking
+        model = AutoModelForAudioClassification.from_pretrained(
+            model_name,
+            trust_remote_code=False,
+            cache_dir=cache_dir,
+        )
+        if model is None:
+            raise RuntimeError(f"AutoModelForAudioClassification.from_pretrained returned None for {model_name}")
+
         model.eval()
         _LANGUAGE_ID_MODEL = model
         _LANGUAGE_ID_PROCESSOR = processor
 
-        print(f"Language ID model loaded: {model_name}")
+        print(f"Language ID model loaded successfully: {model_name}")
         return model, processor
     except Exception as exc:
-        print(f"Failed to load language ID model {model_name}: {exc}")
+        print(f"Failed to load language ID model {model_name}: {type(exc).__name__}: {exc}")
         _LANGUAGE_ID_MODEL = None
         _LANGUAGE_ID_PROCESSOR = None
         raise
@@ -2691,15 +2714,28 @@ def detect_language(
 
     Returns a display name (e.g. "Hindi") if detected and covered by our table,
     or "unknown" if detection fails, language is not covered, or model is unavailable.
+
+    Failures are caught silently — model availability issues never crash the app.
     """
     try:
         model, processor = load_language_id_model()
-    except Exception:
+    except Exception as exc:
+        # Model load failed; silently fall back to "unknown"
         return "unknown"
 
     try:
+        # Validate that loaded objects are usable
+        if processor is None or model is None:
+            return "unknown"
+
+        # Run inference
         inputs = processor(waveform, sampling_rate=sample_rate, return_tensors="pt")
+        if inputs is None:
+            return "unknown"
+
         logits = model(**inputs).logits
+        if logits is None:
+            return "unknown"
 
         lang_id = torch.argmax(logits, dim=-1).item()
         predicted_lang = model.config.id2label.get(lang_id)
@@ -2712,7 +2748,8 @@ def detect_language(
             return "unknown"
 
         return display_name
-    except Exception:
+    except Exception as exc:
+        # Any inference error: silently fall back to "unknown"
         return "unknown"
 
 
