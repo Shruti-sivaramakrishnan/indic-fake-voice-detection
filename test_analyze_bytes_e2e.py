@@ -142,10 +142,10 @@ def main(checkpoint_dir: str = mp.CHECKPOINT_DIR, max_scan: int = 4000) -> int:
           result.verdict in ("real", "uncertain", "fake"), result.verdict)
     check("confidence in [0.5, 1.0]", 0.5 <= result.confidence <= 1.0,
           f"{result.confidence:.4f}")
-    check("detected_language is 'unknown' (no classifier exists)",
-          result.detected_language == "unknown", result.detected_language)
-    check("language_eer is None (language unknown)",
-          result.language_eer is None, str(result.language_eer))
+    check("detected_language is not 'unknown' (MMS-LID model detected language)",
+          result.detected_language != "unknown", result.detected_language)
+    check("language_eer is not None (EER lookup successful)",
+          result.language_eer is not None, str(result.language_eer))
     check("audio_hash is 64 hex chars", len(result.audio_hash) == 64)
     check("repeat call is deterministic",
           result.raw_score == result2.raw_score
