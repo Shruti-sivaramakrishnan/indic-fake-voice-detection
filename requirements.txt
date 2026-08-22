@@ -10,6 +10,8 @@ streamlit>=1.36
 torch>=2.0
 transformers>=4.30
 numpy
-soundfile
-torchaudio
-reportlab              # resampling fallback + non-wav decode fallback
+soundfile                # primary audio decode path in decode_audio_bytes()
+torchaudio                # resampling fallback + non-wav decode fallback
+pydub                    # MP3/OGG/M4A fallback decode in decode_audio_bytes()
+librosa                  # dependency for pydub audio processing
+reportlab                # PDF generation for Evidence Report (Ashitha's feature)

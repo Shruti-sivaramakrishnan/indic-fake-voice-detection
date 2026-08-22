@@ -2573,11 +2573,11 @@ def verdict_from_p_fake(
 
 def decode_audio_bytes(audio_bytes: bytes) -> Tuple[np.ndarray, int]:
     """
-    Decode arbitrary audio bytes (wav/flac/mp3/ogg) to a mono float32 array.
+    Decode arbitrary audio bytes (wav/flac/mp3/ogg/m4a) to a mono float32 array.
 
-    Tries soundfile, then torchaudio. Deliberately does NOT reuse decode_audio(),
-    which expects a torchcodec AudioDecoder from the HF dataset rather than raw
-    bytes.
+    Tries soundfile, then torchaudio (with ffmpeg backend), then pydub.
+    Deliberately does NOT reuse decode_audio(), which expects a torchcodec
+    AudioDecoder from the HF dataset rather than raw bytes.
     """
     import io
 
@@ -2596,15 +2596,124 @@ def decode_audio_bytes(audio_bytes: bytes) -> Tuple[np.ndarray, int]:
     try:
         import torchaudio
 
-        waveform, sr = torchaudio.load(io.BytesIO(audio_bytes))
-        return waveform.mean(dim=0).numpy().astype(np.float32), int(sr)
+        waveform, sr = torchaudio.load(io.BytesIO(audio_bytes), format=None)
+        if waveform.shape[0] > 1:
+            waveform = waveform.mean(dim=0)
+        return waveform.numpy().astype(np.float32), int(sr)
+    except Exception as exc:  # noqa: BLE001
+        last_error = exc
+
+    try:
+        from pydub import AudioSegment
+        import tempfile
+
+        audio = AudioSegment.from_file(io.BytesIO(audio_bytes))
+        waveform_array = np.array(audio.get_array_of_samples(), dtype=np.float32)
+
+        if audio.channels > 1:
+            waveform_array = waveform_array.reshape((-1, audio.channels)).mean(axis=1)
+
+        if audio.sample_width > 1:
+            max_val = (1 << (8 * audio.sample_width - 1))
+            waveform_array = waveform_array / max_val
+
+        return waveform_array, audio.frame_rate
     except Exception as exc:  # noqa: BLE001
         last_error = exc
 
     raise RuntimeError(
-        "Could not decode the supplied audio bytes with soundfile or torchaudio. "
+        "Could not decode the supplied audio bytes with soundfile, torchaudio, or pydub. "
         f"Last error: {type(last_error).__name__}: {last_error}"
     )
+
+
+# Language identification model cache
+_LANGUAGE_ID_MODEL: Optional[Any] = None
+_LANGUAGE_ID_PROCESSOR: Optional[Any] = None
+
+# Mapping from MMS-LID language codes to our display names (English names from per_language_eer.json)
+LANGUAGE_CODE_TO_NAME = {
+    "asm": "Assamese",
+    "ben": "Bengali",
+    "brx": "Bodo",
+    "doi": "Dogri",
+    "eng": "English",
+    "guj": "Gujarati",
+    "hin": "Hindi",
+    "kan": "Kannada",
+    "mal": "Malayalam",
+    "mni": "Manipuri",
+    "mar": "Marathi",
+    "npi": "Nepali",
+    "ory": "Odia",
+    "san": "Sanskrit",
+    "tam": "Tamil",
+    "tel": "Telugu",
+}
+
+
+def load_language_id_model(model_name: str = "facebook/mms-lid-126") -> Tuple[Any, Any]:
+    """
+    Load the MMS language identification model. Cached after first call.
+
+    Returns (model, processor).
+    """
+    global _LANGUAGE_ID_MODEL, _LANGUAGE_ID_PROCESSOR
+
+    if _LANGUAGE_ID_MODEL is not None and _LANGUAGE_ID_PROCESSOR is not None:
+        return _LANGUAGE_ID_MODEL, _LANGUAGE_ID_PROCESSOR
+
+    try:
+        from transformers import AutoModelForAudioClassification, AutoProcessor
+
+        processor = AutoProcessor.from_pretrained(model_name)
+        model = AutoModelForAudioClassification.from_pretrained(model_name)
+        model.eval()
+        _LANGUAGE_ID_MODEL = model
+        _LANGUAGE_ID_PROCESSOR = processor
+
+        print(f"Language ID model loaded: {model_name}")
+        return model, processor
+    except Exception as exc:
+        print(f"Failed to load language ID model {model_name}: {exc}")
+        _LANGUAGE_ID_MODEL = None
+        _LANGUAGE_ID_PROCESSOR = None
+        raise
+
+
+@torch.no_grad()
+def detect_language(
+    waveform: np.ndarray,
+    sample_rate: int = TARGET_SAMPLE_RATE,
+) -> str:
+    """
+    Detect language from a waveform using the MMS-LID model.
+
+    Returns a display name (e.g. "Hindi") if detected and covered by our table,
+    or "unknown" if detection fails, language is not covered, or model is unavailable.
+    """
+    try:
+        model, processor = load_language_id_model()
+    except Exception:
+        return "unknown"
+
+    try:
+        inputs = processor(waveform, sampling_rate=sample_rate, return_tensors="pt")
+        logits = model(**inputs).logits
+
+        lang_id = torch.argmax(logits, dim=-1).item()
+        predicted_lang = model.config.id2label.get(lang_id)
+
+        if predicted_lang is None:
+            return "unknown"
+
+        display_name = LANGUAGE_CODE_TO_NAME.get(predicted_lang)
+        if display_name is None:
+            return "unknown"
+
+        return display_name
+    except Exception:
+        return "unknown"
 
 
 @dataclass
@@ -2738,10 +2847,10 @@ def analyze_bytes(
     Analyse one clip from raw audio bytes.
 
     Args:
-        audio_bytes: encoded audio (wav/flac/mp3/ogg).
-        language_hint: optional caller-supplied language. There is NO language
-            classifier in this pipeline, so detected_language is "unknown" unless
-            this is provided — nothing here guesses a language.
+        audio_bytes: encoded audio (wav/flac/mp3/ogg/m4a).
+        language_hint: optional caller-supplied language. If provided, it is used
+            as the detected_language. Otherwise, the MMS-LID model attempts to
+            detect the language. Detection failures silently fall back to "unknown".
 
     Returns a fully populated AnalysisResult.
     """
@@ -2763,12 +2872,17 @@ def analyze_bytes(
         1.0 - p_fake if verdict == "real" else max(p_fake, 1.0 - p_fake)
     )
 
-    # No classifier exists, so the language is unknown unless the caller says.
-    detected_language = language_hint or "unknown"
+    # Detect language: use hint if provided, otherwise run the LID model.
+    # Language detection is independent of the verdict path and falls back
+    # silently to "unknown" on any failure.
+    if language_hint:
+        detected_language = language_hint
+        language_source = "hint"
+    else:
+        detected_language = detect_language(waveform, sr)
+        language_source = "model" if detected_language != "unknown" else "none"
 
-    # TODO(language_eer): populate once a per-language EER table exists AND a
-    # language is known. Never synthesise a number here — a fabricated
-    # per-language EER would flow straight into Ashitha's PDF report.
+    # Look up per-language EER for the detected language.
     language_eer: Optional[float] = None
     if detected_language != "unknown" and bundle.per_language_eer:
         language_eer = bundle.per_language_eer.get(detected_language)
@@ -2793,7 +2907,7 @@ def analyze_bytes(
             "checkpoint": os.path.basename(bundle.checkpoint_path),
             "checkpoint_epoch": bundle.checkpoint_epoch,
             "calibrated": bundle.summary_path is not None,
-            "language_source": "hint" if language_hint else "none",
+            "language_source": language_source,
             "language_eer_available": bool(bundle.per_language_eer),
         },
     )
