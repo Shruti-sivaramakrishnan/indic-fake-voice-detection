@@ -2629,9 +2629,8 @@ def decode_audio_bytes(audio_bytes: bytes) -> Tuple[np.ndarray, int]:
 
 # Language identification model cache
 _LANGUAGE_ID_MODEL: Optional[Any] = None
-_LANGUAGE_ID_PROCESSOR: Optional[Any] = None
 
-# Mapping from MMS-LID language codes to our display names (English names from per_language_eer.json)
+# Mapping from VoxLingua107 language codes to our display names (ISO 639-3 codes)
 LANGUAGE_CODE_TO_NAME = {
     "asm": "Assamese",
     "ben": "Bengali",
@@ -2644,7 +2643,7 @@ LANGUAGE_CODE_TO_NAME = {
     "mal": "Malayalam",
     "mni": "Manipuri",
     "mar": "Marathi",
-    "npi": "Nepali",
+    "nep": "Nepali",
     "ory": "Odia",
     "san": "Sanskrit",
     "tam": "Tamil",
@@ -2652,55 +2651,43 @@ LANGUAGE_CODE_TO_NAME = {
 }
 
 
-def load_language_id_model(model_name: str = "facebook/mms-lid-126") -> Tuple[Any, Any]:
+def load_language_id_model() -> Any:
     """
-    Load the MMS language identification model. Cached after first call.
+    Load the SpeechBrain VoxLingua107 language identification model.
 
-    Returns (model, processor).
+    Cached after first call. Returns the classifier.
 
-    On Kaggle/Colab, sets appropriate cache dir and handles model download robustly.
+    Uses speechbrain/lang-id-voxlingua107-ecapa (~85MB vs ~1GB for MMS).
+    Saves model to /tmp/lang_id_model for quick repeated loads.
     """
-    global _LANGUAGE_ID_MODEL, _LANGUAGE_ID_PROCESSOR
+    global _LANGUAGE_ID_MODEL
 
-    if _LANGUAGE_ID_MODEL is not None and _LANGUAGE_ID_PROCESSOR is not None:
-        return _LANGUAGE_ID_MODEL, _LANGUAGE_ID_PROCESSOR
+    if _LANGUAGE_ID_MODEL is not None:
+        return _LANGUAGE_ID_MODEL
 
     try:
         import os as os_module
-        from transformers import AutoModelForAudioClassification, AutoProcessor
+        from speechbrain.pretrained import EncoderClassifier
 
-        # Ensure huggingface cache is writable (critical on Kaggle)
-        cache_dir = os_module.path.expanduser("~/.cache/huggingface/hub")
-        os_module.makedirs(cache_dir, exist_ok=True)
+        # Use /tmp for cache (temp storage, OK for Kaggle/Colab)
+        model_dir = "/tmp/lang_id_model"
+        os_module.makedirs(model_dir, exist_ok=True)
 
-        # Load processor first with explicit error checking
-        processor = AutoProcessor.from_pretrained(
-            model_name,
-            trust_remote_code=False,
-            cache_dir=cache_dir,
+        # Load the VoxLingua107 model from SpeechBrain
+        classifier = EncoderClassifier.from_hparams(
+            source="speechbrain/lang-id-voxlingua107-ecapa",
+            savedir=model_dir,
+            run_opts={"device": DEVICE},
         )
-        if processor is None:
-            raise RuntimeError(f"AutoProcessor.from_pretrained returned None for {model_name}")
+        if classifier is None:
+            raise RuntimeError("EncoderClassifier.from_hparams returned None")
 
-        # Load model with explicit error checking
-        model = AutoModelForAudioClassification.from_pretrained(
-            model_name,
-            trust_remote_code=False,
-            cache_dir=cache_dir,
-        )
-        if model is None:
-            raise RuntimeError(f"AutoModelForAudioClassification.from_pretrained returned None for {model_name}")
-
-        model.eval()
-        _LANGUAGE_ID_MODEL = model
-        _LANGUAGE_ID_PROCESSOR = processor
-
-        print(f"Language ID model loaded successfully: {model_name}")
-        return model, processor
+        _LANGUAGE_ID_MODEL = classifier
+        print(f"Language ID model loaded successfully: speechbrain/lang-id-voxlingua107-ecapa")
+        return classifier
     except Exception as exc:
-        print(f"Failed to load language ID model {model_name}: {type(exc).__name__}: {exc}")
+        print(f"Failed to load language ID model: {type(exc).__name__}: {exc}")
         _LANGUAGE_ID_MODEL = None
-        _LANGUAGE_ID_PROCESSOR = None
         raise
 
 
@@ -2710,45 +2697,83 @@ def detect_language(
     sample_rate: int = TARGET_SAMPLE_RATE,
 ) -> str:
     """
-    Detect language from a waveform using the MMS-LID model.
+    Detect language from a waveform using SpeechBrain's VoxLingua107 model.
 
-    Returns a display name (e.g. "Hindi") if detected and covered by our table,
+    Returns a display name (e.g. "Hindi") if detected and covered by our 16 languages,
     or "unknown" if detection fails, language is not covered, or model is unavailable.
 
     Failures are caught silently — model availability issues never crash the app.
     """
     try:
-        model, processor = load_language_id_model()
-    except Exception as exc:
+        classifier = load_language_id_model()
+    except Exception:
         # Model load failed; silently fall back to "unknown"
         return "unknown"
 
     try:
-        # Validate that loaded objects are usable
-        if processor is None or model is None:
+        # Validate classifier is usable
+        if classifier is None:
             return "unknown"
 
-        # Run inference
-        inputs = processor(waveform, sampling_rate=sample_rate, return_tensors="pt")
-        if inputs is None:
+        # Convert numpy array to torch tensor
+        if isinstance(waveform, np.ndarray):
+            waveform_tensor = torch.from_numpy(waveform).float()
+        else:
+            waveform_tensor = torch.tensor(waveform, dtype=torch.float32)
+
+        # Reshape for batch processing if needed (add batch dimension)
+        if waveform_tensor.ndim == 1:
+            waveform_tensor = waveform_tensor.unsqueeze(0)
+
+        # Run language identification via classify_batch
+        # This returns (predictions, language_codes) or similar structure
+        outputs = classifier.classify_batch(waveform_tensor)
+
+        if outputs is None:
             return "unknown"
 
-        logits = model(**inputs).logits
-        if logits is None:
+        # Parse the output from SpeechBrain's classifier
+        # Format is typically: output_dict or (pred_logits, pred_probs, pred_label)
+        # We need to extract the language code
+        predicted_lang = None
+
+        if isinstance(outputs, dict):
+            # If dict, look for 'pred_label' or similar key
+            predicted_lang = outputs.get("pred_label", outputs.get("label"))
+        elif isinstance(outputs, (tuple, list)):
+            # If tuple/list, the language code is typically the last element or at index 2
+            if len(outputs) >= 3:
+                predicted_lang = outputs[2]  # Usually (logits, probs, label)
+            elif len(outputs) >= 1:
+                predicted_lang = outputs[-1]  # Fall back to last element
+        elif isinstance(outputs, torch.Tensor):
+            # If tensor, try to get the top prediction
+            if outputs.ndim > 1:
+                predicted_lang = outputs.argmax(dim=-1).item()
+            else:
+                predicted_lang = outputs.item()
+
+        # Handle tensor outputs that might need conversion to string
+        if isinstance(predicted_lang, torch.Tensor):
+            if predicted_lang.numel() == 1:
+                predicted_lang = predicted_lang.item()
+            else:
+                predicted_lang = str(predicted_lang)
+
+        # Convert to string if needed
+        if predicted_lang is not None and not isinstance(predicted_lang, str):
+            predicted_lang = str(predicted_lang).strip()
+
+        if predicted_lang is None or predicted_lang == "":
             return "unknown"
 
-        lang_id = torch.argmax(logits, dim=-1).item()
-        predicted_lang = model.config.id2label.get(lang_id)
-
-        if predicted_lang is None:
-            return "unknown"
-
+        # Map language code to our display name
         display_name = LANGUAGE_CODE_TO_NAME.get(predicted_lang)
         if display_name is None:
             return "unknown"
 
         return display_name
-    except Exception as exc:
+    except Exception:
         # Any inference error: silently fall back to "unknown"
         return "unknown"
 

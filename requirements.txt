@@ -16,3 +16,4 @@ pydub                    # MP3/OGG/M4A fallback decode in decode_audio_bytes()
 librosa                  # dependency for pydub audio processing
 reportlab                # PDF generation for Evidence Report (Ashitha's feature)
 truststore               # SSL certificate handling for secure HTTPS connections in app.py
+speechbrain>=0.5.12      # VoxLingua107 language identification (~85MB model, faster than MMS-LID)
