@@ -10,6 +10,10 @@ experiments/
 # Local QA artifacts
 tmp/
 .DS_Store
+data_pipeline/metadata_v2.jsonl
+data_pipeline/metadata_v2.summary.json
+data_pipeline/split_ids_v2.json
+data_pipeline/split_ids_v2.audit.json
 
 # Python
 __pycache__/

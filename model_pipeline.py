@@ -65,6 +65,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset, Sampler
 
+from data_pipeline.split_protocol import select_stratified_ids, verify_split_audit
 from voice_guard_core import (
     AudioValidationError,  # noqa: F401 - public compatibility re-export
     DEFAULT_AUDIO_POLICY,
@@ -232,9 +233,34 @@ def load_verified_metadata(
     if not os.path.exists(metadata_file):
         raise FileNotFoundError(f"Verified metadata not found: {metadata_file}")
 
+    suffix = os.path.splitext(metadata_file)[1].casefold()
+    if suffix in {".jsonl", ".ndjson"}:
+        with open(metadata_file, "r", encoding="utf-8") as f:
+            rows = [json.loads(line) for line in f if line.strip()]
+        return {
+            "all": [
+                (
+                    str(row.get("id", row.get("clip_id", ""))),
+                    str(row["language"]),
+                    int(row.get("label", row.get("is_tts"))),
+                )
+                for row in rows
+            ]
+        }
+
     with open(metadata_file, "r", encoding="utf-8") as f:
         raw = json.load(f)
-
+    if isinstance(raw, list):
+        return {
+            "all": [
+                (
+                    str(row.get("id", row.get("clip_id", ""))),
+                    str(row["language"]),
+                    int(row.get("label", row.get("is_tts"))),
+                )
+                for row in raw
+            ]
+        }
     return {
         split: [(row[0], row[1], int(row[2])) for row in rows]
         for split, rows in raw.items()
@@ -261,6 +287,8 @@ def build_label_lookup(
 def assert_split_integrity(
     splits: Optional[Dict[str, List[str]]] = None,
     require_group_disjoint: bool = False,
+    split_file: Optional[str] = None,
+    metadata_file: Optional[str] = None,
 ) -> None:
     """
     Cheap in-process restatement of data_pipeline/leakage_audit.py, so a training
@@ -281,7 +309,17 @@ def assert_split_integrity(
     if len(train | val | test) != EXPECTED_TOTAL_CLIPS:
         raise ValueError("Unique clip ID count does not match the frozen split.")
 
-    if require_group_disjoint:
+    is_alternate_split = (
+        split_file is not None
+        and os.path.realpath(split_file) != os.path.realpath(SPLIT_FILE)
+    )
+    if require_group_disjoint and is_alternate_split:
+        audit = verify_split_audit(split_file, metadata_file=metadata_file)
+        if int(audit["total_clips"]) != len(train | val | test):
+            raise ValueError(
+                "Split audit clip count does not match the loaded split contents."
+            )
+    elif require_group_disjoint:
         def family(clip_id: str) -> str:
             return re.sub(r"[_-]?\d+$", "", clip_id.strip()).casefold()
 
@@ -3541,11 +3579,16 @@ def run_step6_training(
     # --- 1-2. guards --------------------------------------------------------
     print("\n[1/6] Verifying frozen split integrity...")
     splits = load_frozen_split(split_file)
-    assert_split_integrity(splits, require_group_disjoint=True)
+    assert_split_integrity(
+        splits,
+        require_group_disjoint=True,
+        split_file=split_file,
+        metadata_file=metadata_file,
+    )
     metadata = load_verified_metadata(metadata_file)
     assert_split_coverage(splits, metadata)
     print(
-        "  split OK — exact IDs/source-family proxies are group-disjoint and "
+        "  split OK — exact IDs/declared v2 groups are disjoint and "
         "every language/label stratum is represented."
     )
 
@@ -3562,6 +3605,21 @@ def run_step6_training(
 
     # --- 4. feature cache ---------------------------------------------------
     targets = {"train": set(train_ids), "validation": set(val_ids)}
+    if max_clips_per_split is not None:
+        targets = {
+            name: select_stratified_ids(
+                clip_ids,
+                label_lookup,
+                language_lookup,
+                max_clips_per_split,
+            )
+            for name, clip_ids in targets.items()
+        }
+        print(
+            "  rehearsal targets selected deterministically across "
+            "language/label strata: "
+            + ", ".join(f"{name}={len(ids):,}" for name, ids in targets.items())
+        )
 
     if skip_extraction:
         print("\n[4/6] skip_extraction=True — reusing existing cache.")

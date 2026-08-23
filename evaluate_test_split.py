@@ -75,7 +75,12 @@ def main(
     # --- guards, same as Step 6 --------------------------------------------
     print("[1/4] Verifying frozen split integrity...")
     splits = mp.load_frozen_split(split_file)
-    mp.assert_split_integrity(splits, require_group_disjoint=True)
+    mp.assert_split_integrity(
+        splits,
+        require_group_disjoint=True,
+        split_file=split_file,
+        metadata_file=metadata_file,
+    )
     metadata = mp.load_verified_metadata(metadata_file)
     mp.assert_split_coverage(splits, metadata)
     print("  OK - groups are disjoint and every language/label is represented.\n")

@@ -93,6 +93,13 @@ def main() -> int:
             "split_sha256": summary["split_sha256"],
         }
 
+    invalid = [name for name, summary in summaries.items() if summary["val_eer"] is None]
+    if invalid:
+        raise RuntimeError(
+            "Validation EER was undefined for candidates "
+            f"{invalid}. Check that the rehearsal/full validation cache contains "
+            "both real and fake examples."
+        )
     ranking = sorted(summaries, key=lambda name: summaries[name]["val_eer"])
     payload = {
         "selection_scope": "validation_only",

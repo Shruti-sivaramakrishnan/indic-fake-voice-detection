@@ -1,14 +1,16 @@
-# Kaggle deployment checklist
+# Kaggle demo: run and open the UI
 
-The public v2 notebook failed because an ngrok endpoint was already online (`ERR_NGROK_334`), not because Streamlit failed. Its warm-up also submitted one second of digital silence and received a fake verdict; the repaired input policy now rejects that clip before inference.
+The checked-in notebook is self-contained: it clones the repository, resolves the selected Git reference, installs dependencies, starts Streamlit, waits for the health endpoint, and prints a public ngrok URL. The earlier public notebook failed because an ngrok endpoint was already online (`ERR_NGROK_334`), not because Streamlit failed. Its warm-up also submitted one second of digital silence and received a fake verdict; the repaired input policy now rejects that clip before inference.
 
-## Before launching
+## One-time Kaggle setup
 
-1. Verify the local diff and create an approved Git commit only when ready.
-2. Put that exact 40-character commit SHA in `VOICE_GUARD_REF` in the notebook. Do not deploy mutable `main`.
-3. Enable a Kaggle GPU accelerator. The 300M-parameter frontend is much slower on CPU.
-4. Keep the existing ngrok authentication setup if desired, but do not print the credential or store it in repository files.
-5. Use `requirements-kaggle.txt`; do not install the same dependencies again in later cells.
+1. Open `kaggle/voice_guard_demo.ipynb` in Kaggle.
+2. In **Add-ons → Secrets**, create `NGROK_AUTHTOKEN`, paste the token as the value, and grant the notebook access.
+3. Enable internet access and a GPU accelerator.
+4. Run all cells from top to bottom.
+5. Open the HTTPS URL printed by the final hosting cell. Keep that cell running while using the UI.
+
+`VOICE_GUARD_REF` defaults to `main`, and the setup cell prints the exact resolved commit SHA for traceability. For a frozen demonstration, change it to an approved 40-character commit SHA before running. The notebook uses `requirements-kaggle.txt`; do not reinstall the same dependencies in later cells.
 
 ## Hosting behavior
 
@@ -33,3 +35,7 @@ tail -n 100 /kaggle/working/voice_guard_streamlit.log
 ```
 
 If model download fails, check Kaggle internet access and Hugging Face availability. If audio decoding fails only for MP3/M4A, confirm the Kaggle image has ffmpeg available for the torchaudio/pydub fallback.
+
+## What this demo does not do
+
+The demo notebook uses the checkpoint committed under `checkpoints/`. It does not train a new model. Run `kaggle/voice_guard_v2_training.ipynb` separately to produce and validate a v2 candidate, then replace the demo checkpoint only after the full validation and one-time test procedure in [V2_TRAINING.md](V2_TRAINING.md).

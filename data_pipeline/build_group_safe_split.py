@@ -81,9 +81,13 @@ def prepare_rows(
     group_columns: Sequence[str],
     allow_id_family_proxy: bool,
 ) -> Tuple[List[Dict[str, Any]], str]:
-    prepared = []
+    prepared: List[Dict[str, Any]] = []
     seen_ids = set()
-    strategy = "columns:" + "+".join(group_columns) if group_columns else "id_family_proxy"
+    strategy = (
+        "connected_components:any_shared:" + "+".join(group_columns)
+        if group_columns
+        else "id_family_proxy"
+    )
     for index, row in enumerate(rows, start=1):
         clip_id = str(row.get("id", row.get("clip_id", ""))).strip()
         language = str(row.get("language", "")).strip()
@@ -97,9 +101,13 @@ def prepare_rows(
             missing = [column for column in group_columns if not str(row.get(column, "")).strip()]
             if missing:
                 raise ValueError(f"Row {index} is missing group columns: {missing}")
-            group_id = "||".join(normalize_text(row[column]) for column in group_columns)
+            group_tokens = [
+                f"{column}:{normalize_text(row[column])}" for column in group_columns
+            ]
+            group_id = ""
         elif allow_id_family_proxy:
             group_id = id_family(clip_id)
+            group_tokens = []
         else:
             raise ValueError(
                 "No trustworthy group columns were supplied. Pass --group-columns "
@@ -113,8 +121,45 @@ def prepare_rows(
                 "language": language,
                 "label": canonical_label(row["label"]),
                 "group_id": group_id,
+                "group_tokens": group_tokens,
             }
         )
+
+    if group_columns:
+        # Multiple group columns are OR constraints, not a composite-key AND.
+        # If two rows share a speaker OR source OR prompt, they must stay in the
+        # same connected component even when their other fields differ.
+        parents = list(range(len(prepared)))
+
+        def find(index: int) -> int:
+            while parents[index] != index:
+                parents[index] = parents[parents[index]]
+                index = parents[index]
+            return index
+
+        def union(left: int, right: int) -> None:
+            left_root, right_root = find(left), find(right)
+            if left_root != right_root:
+                parents[right_root] = left_root
+
+        token_owner: Dict[str, int] = {}
+        for row_index, row in enumerate(prepared):
+            for token in row["group_tokens"]:
+                previous = token_owner.setdefault(token, row_index)
+                union(row_index, previous)
+
+        component_tokens: Dict[int, set[str]] = defaultdict(set)
+        for row_index, row in enumerate(prepared):
+            component_tokens[find(row_index)].update(row["group_tokens"])
+        component_ids = {
+            root: hashlib.sha256("\0".join(sorted(tokens)).encode("utf-8")).hexdigest()
+            for root, tokens in component_tokens.items()
+        }
+        for row_index, row in enumerate(prepared):
+            row["group_id"] = component_ids[find(row_index)]
+
+    for row in prepared:
+        row.pop("group_tokens", None)
     return prepared, strategy
 
 
@@ -265,18 +310,26 @@ def main() -> int:
         )
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(splits, indent=2) + "\n", encoding="utf-8")
+    split_bytes = (json.dumps(splits, indent=2) + "\n").encode("utf-8")
+    split_tmp = args.output.with_suffix(args.output.suffix + ".tmp")
+    split_tmp.write_bytes(split_bytes)
+    split_tmp.replace(args.output)
     audit_path = args.output.with_suffix(".audit.json")
     audit_payload = {
         "protocol_version": "v2-group-disjoint",
         "group_strategy": strategy,
+        "group_columns": list(args.group_columns),
         "source_metadata": str(args.metadata.resolve()),
         "source_sha256": hashlib.sha256(source_bytes).hexdigest(),
+        "split_sha256": hashlib.sha256(split_bytes).hexdigest(),
         "seed": args.seed,
         "ratios": ratios,
         **audit,
     }
-    audit_path.write_text(json.dumps(audit_payload, indent=2) + "\n", encoding="utf-8")
+    audit_bytes = (json.dumps(audit_payload, indent=2) + "\n").encode("utf-8")
+    audit_tmp = audit_path.with_suffix(audit_path.suffix + ".tmp")
+    audit_tmp.write_bytes(audit_bytes)
+    audit_tmp.replace(audit_path)
     print(f"Wrote {args.output}")
     print(f"Wrote {audit_path}")
     print(json.dumps(audit["distribution"], indent=2))

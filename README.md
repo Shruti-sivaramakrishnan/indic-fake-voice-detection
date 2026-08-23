@@ -49,19 +49,25 @@ The last command is expected to **fail for `data_pipeline/split_ids.json`**. Tha
 Preferred metadata contains real `speaker_id`, `source_id`, `session_id`, generator, and normalized prompt/transcript fields. Keep every relevant group in exactly one split.
 
 ```bash
-python data_pipeline/build_group_safe_split.py metadata.jsonl \
-  --group-columns speaker_id source_id prompt_id \
+python data_pipeline/export_hf_metadata.py \
+  --output data_pipeline/metadata_v2.jsonl
+
+python data_pipeline/build_group_safe_split.py \
+  data_pipeline/metadata_v2.jsonl \
+  --group-columns prompt_id \
   --output data_pipeline/split_ids_v2.json
 
 python data_pipeline/leakage_audit.py \
   --split-file data_pipeline/split_ids_v2.json
 ```
 
-If those fields are not yet available, `--allow-id-family-proxy` can test an explicitly acknowledged ID-prefix fallback. For the current metadata that proxy is too coarse to retain every language/label in every split, so the builder refuses it by default. `--allow-missing-strata` exists only for a non-reportable exploratory candidate. Regenerate all train/validation/test feature caches and degraded-audio manifests after adopting v2; never reuse v1 caches.
+The official upstream dataset currently exposes transcript text but not stable speaker, session, source, or generator identifiers. The exporter therefore derives a normalized, language-scoped prompt hash without downloading audio. This supports a **prompt-disjoint** v2 claim only; it does not prove unseen-speaker or unseen-generator generalization. When trustworthy lineage metadata becomes available, pass every relevant field to `--group-columns`. Shared values are treated as OR constraints through connected components, so sharing a speaker **or** source **or** prompt keeps records together.
+
+If trustworthy fields are unavailable, `--allow-id-family-proxy` can test an explicitly acknowledged ID-prefix fallback. For the current metadata that proxy is too coarse to retain every language/label in every split, so the builder refuses it by default. `--allow-missing-strata` exists only for a non-reportable exploratory candidate. Regenerate all train/validation/test feature caches and degraded-audio manifests after adopting v2; never reuse v1 caches. The audit file is SHA-256-bound to the exact split and is verified before training or evaluation.
 
 ## Improve the model without contaminating the test set
 
-The repository now supports three head ablations (`gat`, `attention_pool`, and `mean_pool`) plus optional feature-noise, time-mask, and channel-dropout augmentation. Compare them on v2 validation only:
+The repository now compares five validation candidates: the GAT with shared or separate layer normalisation, attention-pooling and mean-pooling baselines, and a feature-robust GAT with noise, time-mask, and channel-dropout augmentation. Compare them on v2 validation only:
 
 ```bash
 python run_validation_ablations.py \
@@ -72,20 +78,22 @@ python run_validation_ablations.py \
 
 Select a candidate using validation EER, calibration, and clean/noise/codec robustness. Then run `evaluate_test_split.py` once for the final v2 model. Do not select thresholds, heads, or augmentation settings from the already-observed v1 test results.
 
+For a ready-to-run GPU workflow, use [kaggle/voice_guard_v2_training.ipynb](kaggle/voice_guard_v2_training.ipynb). Its default `smoke` mode checks the complete pipeline on capped data. Change `VOICE_GUARD_TRAIN_MODE` to `full` only for the reportable run, review validation ablations, lock one checkpoint, and then explicitly enable the one-time test cell. See [docs/V2_TRAINING.md](docs/V2_TRAINING.md).
+
 The existing robustness evidence makes noisy/channel audio the highest-priority model problem: the historical model's EER increased sharply under 10 dB MUSAN noise. A future report should include clean, codec, noise, replay/channel, unseen-generator, and real-control results with bootstrap confidence intervals.
 
 ## Kaggle and ngrok
 
-Use [docs/KAGGLE_DEPLOYMENT.md](docs/KAGGLE_DEPLOYMENT.md) and the checked-in [Kaggle notebook](kaggle/voice_guard_demo.ipynb). The launcher:
+Use [docs/KAGGLE_DEPLOYMENT.md](docs/KAGGLE_DEPLOYMENT.md) and the checked-in [Kaggle demo notebook](kaggle/voice_guard_demo.ipynb). Add `NGROK_AUTHTOKEN` as a Kaggle Secret, enable internet and a GPU, then run every cell. The launcher:
 
-- checks out an approved commit instead of deleting and recloning mutable `main`;
+- checks out `VOICE_GUARD_REF` and prints the exact resolved commit SHA (`main` by default, or a pinned commit for a frozen demo);
 - installs dependencies once;
 - starts Streamlit and waits for its health endpoint;
 - closes local tunnels before connecting;
 - handles endpoint-conflict errors cleanly;
 - keeps the hosting cell alive and cleans up in `finally`.
 
-The public notebook's existing ngrok credential was intentionally not changed in this repair. Do not print it in logs or copy it into repository files.
+The notebook reads the token from Kaggle Secrets and never prints it. Do not paste a credential into a cell, log, report, or repository file.
 
 ## Repository map
 

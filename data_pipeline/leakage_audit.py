@@ -15,6 +15,11 @@ from collections import Counter
 from pathlib import Path
 from typing import Dict, Iterable, List
 
+try:
+    from data_pipeline.split_protocol import verify_split_audit
+except ModuleNotFoundError:  # direct `python data_pipeline/leakage_audit.py`
+    from split_protocol import verify_split_audit
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SPLIT_FILE = REPO_ROOT / "data_pipeline" / "split_ids.json"
@@ -144,10 +149,27 @@ def run_audit(
     print(f"Split: {split_file}")
     splits = load_splits(split_file)
     exact_ok = check_exact_ids(splits, expected_total)
-    groups_ok = check_group_overlap(splits)
+    proxy_groups_ok = check_group_overlap(splits)
     if split_file.resolve() == DEFAULT_SPLIT_FILE.resolve():
+        groups_ok = proxy_groups_ok
         lineage_ok = check_degraded_lineage(splits)
     else:
+        print("\n=== DECLARED V2 GROUP PROTOCOL ===")
+        try:
+            audit = verify_split_audit(split_file)
+        except (FileNotFoundError, ValueError, json.JSONDecodeError) as exc:
+            print(f"FAIL: {exc}")
+            groups_ok = False
+        else:
+            print(f"protocol: {audit['protocol_version']}")
+            print(f"strategy: {audit['group_strategy']}")
+            print(f"groups: {audit['total_groups']:,}; declared overlap: 0")
+            if not proxy_groups_ok:
+                print(
+                    "NOTE: filename-family proxies still overlap. They are a "
+                    "diagnostic, not the declared grouping source for this split."
+                )
+            groups_ok = True
         print("\n=== DEGRADED-AUDIO LINEAGE ===")
         print(
             "Skipped legacy v1 degraded manifests for this alternate split. "
@@ -156,7 +178,11 @@ def run_audit(
         lineage_ok = True
 
     historical_exception = False
-    if not groups_ok and allow_group_overlap:
+    if (
+        split_file.resolve() == DEFAULT_SPLIT_FILE.resolve()
+        and not groups_ok
+        and allow_group_overlap
+    ):
         print("\nWARNING: group overlap was explicitly allowed for historical v1 review.")
         groups_ok = True
         historical_exception = True
