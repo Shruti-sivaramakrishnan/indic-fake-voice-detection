@@ -227,6 +227,280 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
     },
 }
 
+# Focused analysis-screen copy. These strings deliberately call the output a
+# model score/automated analysis rather than proof or a calibrated probability.
+TRANSLATIONS.update({
+    "how_it_works_title": {
+        "English": "Analyze a voice recording",
+        "Hindi": "वॉइस रिकॉर्डिंग का विश्लेषण करें",
+        "Tamil": "குரல் பதிவைப் பகுப்பாய்வு செய்யுங்கள்",
+        "Kannada": "ಧ್ವನಿ ರೆಕಾರ್ಡಿಂಗ್ ಅನ್ನು ವಿಶ್ಲೇಷಿಸಿ",
+    },
+    "how_it_works_body": {
+        "English": "Upload 1-30 seconds of clear speech. Voice Guard returns a cautious three-way result: likely genuine, inconclusive, or likely synthetic.",
+        "Hindi": "1-30 सेकंड की साफ़ आवाज़ अपलोड करें। Voice Guard सावधानी से तीन में से एक नतीजा देता है: संभवतः असली, अनिर्णायक या संभवतः सिंथेटिक।",
+        "Tamil": "1-30 வினாடிகள் தெளிவான பேச்சைப் பதிவேற்றவும். Voice Guard உண்மையாக இருக்கலாம், முடிவற்றது அல்லது செயற்கையாக இருக்கலாம் என்ற மூன்று முடிவுகளில் ஒன்றைக் காட்டும்.",
+        "Kannada": "1-30 ಸೆಕೆಂಡುಗಳ ಸ್ಪಷ್ಟ ಮಾತನ್ನು ಅಪ್‌ಲೋಡ್ ಮಾಡಿ. Voice Guard ಬಹುಶಃ ನೈಜ, ಅನಿಶ್ಚಿತ ಅಥವಾ ಬಹುಶಃ ಕೃತಕ ಎಂಬ ಮೂರು ಫಲಿತಾಂಶಗಳಲ್ಲಿ ಒಂದನ್ನು ನೀಡುತ್ತದೆ.",
+    },
+    "upload_help": {
+        "English": "WAV, MP3, FLAC, OGG, or M4A; maximum 25 MB and 30 seconds.",
+        "Hindi": "WAV, MP3, FLAC, OGG या M4A; अधिकतम 25 MB और 30 सेकंड।",
+        "Tamil": "WAV, MP3, FLAC, OGG அல்லது M4A; அதிகபட்சம் 25 MB மற்றும் 30 வினாடிகள்.",
+        "Kannada": "WAV, MP3, FLAC, OGG ಅಥವಾ M4A; ಗರಿಷ್ಠ 25 MB ಮತ್ತು 30 ಸೆಕೆಂಡುಗಳು.",
+    },
+    "analyzing_status": {
+        "English": "Loading the model and analyzing the selected clip...",
+        "Hindi": "मॉडल लोड करके चुनी गई क्लिप का विश्लेषण हो रहा है...",
+        "Tamil": "மாதிரி ஏற்றப்பட்டு தேர்ந்தெடுத்த கிளிப் பகுப்பாய்வு செய்யப்படுகிறது...",
+        "Kannada": "ಮಾದರಿಯನ್ನು ಲೋಡ್ ಮಾಡಿ ಆಯ್ಕೆ ಮಾಡಿದ ಕ್ಲಿಪ್ ವಿಶ್ಲೇಷಿಸಲಾಗುತ್ತಿದೆ...",
+    },
+    "analysis_failed_body": {
+        "English": "The clip could not be analyzed. Check the audio format and try again; technical details were logged privately.",
+        "Hindi": "क्लिप का विश्लेषण नहीं हो सका। ऑडियो फ़ॉर्मैट जांचकर फिर कोशिश करें; तकनीकी विवरण निजी लॉग में दर्ज हैं।",
+        "Tamil": "கிளிப்பை பகுப்பாய்வு செய்ய முடியவில்லை. ஆடியோ வடிவத்தைச் சரிபார்த்து மீண்டும் முயலவும்; தொழில்நுட்ப விவரங்கள் தனிப்பட்ட பதிவில் உள்ளன.",
+        "Kannada": "ಕ್ಲಿಪ್ ಅನ್ನು ವಿಶ್ಲೇಷಿಸಲು ಸಾಧ್ಯವಾಗಲಿಲ್ಲ. ಆಡಿಯೊ ಸ್ವರೂಪ ಪರಿಶೀಲಿಸಿ ಮತ್ತೆ ಪ್ರಯತ್ನಿಸಿ; ತಾಂತ್ರಿಕ ವಿವರಗಳು ಖಾಸಗಿ ಲಾಗ್‌ನಲ್ಲಿ ಇವೆ.",
+    },
+    "ai_likelihood_score": {
+        "English": "AI-likelihood model score",
+        "Hindi": "एआई-संभावना मॉडल स्कोर",
+        "Tamil": "AI சாத்திய மாதிரி மதிப்பெண்",
+        "Kannada": "AI-ಸಂಭವನೀಯತೆ ಮಾದರಿ ಅಂಕ",
+    },
+    "score_explanation": {
+        "English": "This score is the model's temperature-scaled output, not a guaranteed real-world probability.",
+        "Hindi": "यह स्कोर मॉडल का तापमान-स्केल किया गया आउटपुट है, वास्तविक दुनिया की गारंटीकृत संभावना नहीं।",
+        "Tamil": "இந்த மதிப்பெண் மாதிரியின் temperature-scaled வெளியீடு; இது உறுதியான நிஜ உலக நிகழ்தகவு அல்ல.",
+        "Kannada": "ಈ ಅಂಕವು ಮಾದರಿಯ temperature-scaled ಫಲಿತಾಂಶ; ಇದು ಖಚಿತ ನೈಜ-ಜಗತ್ತಿನ ಸಂಭವನೀಯತೆ ಅಲ್ಲ.",
+    },
+    "likely_genuine_end": {
+        "English": "0% - more genuine-like",
+        "Hindi": "0% - असली आवाज़ जैसा",
+        "Tamil": "0% - உண்மைக் குரல் போன்றது",
+        "Kannada": "0% - ನೈಜ ಧ್ವನಿಯಂತೆ",
+    },
+    "likely_synthetic_end": {
+        "English": "100% - more synthetic-like",
+        "Hindi": "100% - सिंथेटिक आवाज़ जैसा",
+        "Tamil": "100% - செயற்கைக் குரல் போன்றது",
+        "Kannada": "100% - ಕೃತಕ ಧ್ವನಿಯಂತೆ",
+    },
+    "duration_label": {
+        "English": "Duration", "Hindi": "अवधि", "Tamil": "கால அளவு", "Kannada": "ಅವಧಿ",
+    },
+    "file_label": {
+        "English": "Selected file", "Hindi": "चुनी गई फ़ाइल", "Tamil": "தேர்ந்தெடுத்த கோப்பு", "Kannada": "ಆಯ್ಕೆ ಮಾಡಿದ ಫೈಲ್",
+    },
+    "size_label": {
+        "English": "File size", "Hindi": "फ़ाइल का आकार", "Tamil": "கோப்பு அளவு", "Kannada": "ಫೈಲ್ ಗಾತ್ರ",
+    },
+    "safety_action_title": {
+        "English": "Use the result as a signal, not a final decision",
+        "Hindi": "नतीजे को संकेत मानें, अंतिम निर्णय नहीं",
+        "Tamil": "முடிவை ஒரு சுட்டியாக மட்டும் பயன்படுத்துங்கள்; இறுதி தீர்ப்பாக அல்ல",
+        "Kannada": "ಫಲಿತಾಂಶವನ್ನು ಸೂಚನೆಯಾಗಿ ಬಳಸಿ, ಅಂತಿಮ ನಿರ್ಧಾರವಾಗಿ ಅಲ್ಲ",
+    },
+    "safety_action_body": {
+        "English": "For any important or urgent request, confirm the speaker through a separate contact method you already trust.",
+        "Hindi": "किसी भी महत्वपूर्ण या तत्काल अनुरोध के लिए, किसी दूसरे भरोसेमंद संपर्क माध्यम से वक्ता की पुष्टि करें।",
+        "Tamil": "முக்கியமான அல்லது அவசரமான கோரிக்கைக்கு, நீங்கள் ஏற்கனவே நம்பும் வேறு தொடர்பு வழியில் பேசுபவரை உறுதிப்படுத்துங்கள்.",
+        "Kannada": "ಯಾವುದೇ ಪ್ರಮುಖ ಅಥವಾ ತುರ್ತು ವಿನಂತಿಗೆ, ನೀವು ಈಗಾಗಲೇ ನಂಬುವ ಪ್ರತ್ಯೇಕ ಸಂಪರ್ಕ ವಿಧಾನದಿಂದ ಮಾತನಾಡುವವರನ್ನು ಖಚಿತಪಡಿಸಿಕೊಳ್ಳಿ.",
+    },
+    "permanent_disclaimer": {
+        "English": "Automated analysis can be wrong, especially with noise, compression, unseen generators, very short speech, or playback recordings. This is not proof of authenticity or deception.",
+        "Hindi": "स्वचालित विश्लेषण गलत हो सकता है, खासकर शोर, कंप्रेशन, नए जनरेटर, बहुत छोटी आवाज़ या प्लेबैक रिकॉर्डिंग में। यह असलियत या धोखे का प्रमाण नहीं है।",
+        "Tamil": "சத்தம், சுருக்கம், காணாத உருவாக்கிகள், மிகக் குறுகிய பேச்சு அல்லது மீண்டும் பதிவு செய்த ஆடியோவில் தானியங்கி பகுப்பாய்வு தவறாக இருக்கலாம். இது உண்மை அல்லது மோசடிக்கான சான்று அல்ல.",
+        "Kannada": "ಶಬ್ದ, ಕಂಪ್ರೆಷನ್, ಕಾಣದ ಜನರೇಟರ್‌ಗಳು, ಅತಿ ಚಿಕ್ಕ ಮಾತು ಅಥವಾ ಪ್ಲೇಬ್ಯಾಕ್ ರೆಕಾರ್ಡಿಂಗ್‌ನಲ್ಲಿ ಸ್ವಯಂಚಾಲಿತ ವಿಶ್ಲೇಷಣೆ ತಪ್ಪಾಗಬಹುದು. ಇದು ನೈಜತೆ ಅಥವಾ ಮೋಸದ ಪುರಾವೆಯಲ್ಲ.",
+    },
+    "raw_score_label": {
+        "English": "Raw model logit", "Hindi": "कच्चा मॉडल लॉजिट", "Tamil": "மூல மாதிரி logit", "Kannada": "ಮೂಲ ಮಾದರಿ logit",
+    },
+    "sample_rate_label": {
+        "English": "Input sample rate", "Hindi": "इनपुट सैंपल रेट", "Tamil": "உள்ளீட்டு sample rate", "Kannada": "ಇನ್‌ಪುಟ್ sample rate",
+    },
+    "policy_label": {
+        "English": "Decision policy", "Hindi": "निर्णय नीति", "Tamil": "முடிவு கொள்கை", "Kannada": "ನಿರ್ಧಾರ ನೀತಿ",
+    },
+    "quality_warning_clipping": {
+        "English": "The recording may be clipped. A cleaner recording can produce a more reliable score.",
+        "Hindi": "रिकॉर्डिंग क्लिप हो सकती है। साफ़ रिकॉर्डिंग अधिक भरोसेमंद स्कोर दे सकती है।",
+        "Tamil": "பதிவு clipping ஆகியிருக்கலாம். தெளிவான பதிவு அதிக நம்பகமான மதிப்பெண் தரலாம்.",
+        "Kannada": "ರೆಕಾರ್ಡಿಂಗ್ ಕ್ಲಿಪ್ ಆಗಿರಬಹುದು. ಸ್ವಚ್ಛ ರೆಕಾರ್ಡಿಂಗ್ ಹೆಚ್ಚು ವಿಶ್ವಾಸಾರ್ಹ ಅಂಕ ನೀಡಬಹುದು.",
+    },
+    "pdf_error": {
+        "English": "The automated analysis report could not be generated.",
+        "Hindi": "स्वचालित विश्लेषण रिपोर्ट नहीं बन सकी।",
+        "Tamil": "தானியங்கி பகுப்பாய்வு அறிக்கையை உருவாக்க முடியவில்லை.",
+        "Kannada": "ಸ್ವಯಂಚಾಲಿತ ವಿಶ್ಲೇಷಣಾ ವರದಿಯನ್ನು ರಚಿಸಲಾಗಲಿಲ್ಲ.",
+    },
+    "privacy_note": {
+        "English": "Privacy: this demo processes the uploaded clip in the running Kaggle/Streamlit session. Do not upload confidential audio to a public deployment.",
+        "Hindi": "गोपनीयता: यह डेमो अपलोड की गई क्लिप को चल रहे Kaggle/Streamlit सत्र में प्रोसेस करता है। सार्वजनिक डिप्लॉयमेंट पर गोपनीय ऑडियो अपलोड न करें।",
+        "Tamil": "தனியுரிமை: பதிவேற்றிய கிளிப் இயங்கும் Kaggle/Streamlit அமர்வில் செயலாக்கப்படுகிறது. பொது deployment-இல் ரகசிய ஆடியோவைப் பதிவேற்ற வேண்டாம்.",
+        "Kannada": "ಗೌಪ್ಯತೆ: ಅಪ್‌ಲೋಡ್ ಮಾಡಿದ ಕ್ಲಿಪ್ ನಡೆಯುತ್ತಿರುವ Kaggle/Streamlit ಸೆಷನ್‌ನಲ್ಲಿ ಪ್ರಕ್ರಿಯೆಯಾಗುತ್ತದೆ. ಸಾರ್ವಜನಿಕ deployment‌ಗೆ ಗೌಪ್ಯ ಆಡಿಯೊ ಅಪ್‌ಲೋಡ್ ಮಾಡಬೇಡಿ.",
+    },
+    "nav_status": {
+        "English": "Research preview",
+        "Hindi": "रिसर्च प्रीव्यू",
+        "Tamil": "ஆராய்ச்சி முன்னோட்டம்",
+        "Kannada": "ಸಂಶೋಧನಾ ಪೂರ್ವವೀಕ್ಷಣೆ",
+    },
+    "hero_eyebrow": {
+        "English": "Multilingual voice analysis",
+        "Hindi": "बहुभाषी वॉइस विश्लेषण",
+        "Tamil": "பலமொழி குரல் பகுப்பாய்வு",
+        "Kannada": "ಬಹುಭಾಷಾ ಧ್ವನಿ ವಿಶ್ಲೇಷಣೆ",
+    },
+    "hero_title_main": {
+        "English": "Is this voice human or",
+        "Hindi": "यह आवाज़ इंसानी है या",
+        "Tamil": "இந்தக் குரல் மனிதருடையதா அல்லது",
+        "Kannada": "ಈ ಧ್ವನಿ ಮಾನವನದೋ ಅಥವಾ",
+    },
+    "hero_title_accent": {
+        "English": "AI-generated?",
+        "Hindi": "एआई से बनाई गई?",
+        "Tamil": "AI உருவாக்கியதா?",
+        "Kannada": "AI ರಚಿಸಿದ್ದೇ?",
+    },
+    "hero_body": {
+        "English": "Upload a short recording and review the acoustic signals detected by Voice Guard. You receive a cautious result with the score and limitations clearly explained.",
+        "Hindi": "एक छोटी रिकॉर्डिंग अपलोड करें और Voice Guard द्वारा पहचाने गए ध्वनिक संकेत देखें। आपको स्कोर और सीमाओं की साफ़ व्याख्या के साथ सावधानीपूर्ण नतीजा मिलेगा।",
+        "Tamil": "ஒரு குறுகிய பதிவைப் பதிவேற்றி, Voice Guard கண்டறியும் ஒலியியல் சுட்டிகளைப் பாருங்கள். மதிப்பெண்ணும் வரம்புகளும் தெளிவாக விளக்கப்பட்ட எச்சரிக்கையான முடிவைப் பெறுவீர்கள்.",
+        "Kannada": "ಚಿಕ್ಕ ರೆಕಾರ್ಡಿಂಗ್ ಅಪ್‌ಲೋಡ್ ಮಾಡಿ Voice Guard ಪತ್ತೆಮಾಡುವ ಧ್ವನಿಶಾಸ್ತ್ರೀಯ ಸೂಚನೆಗಳನ್ನು ಪರಿಶೀಲಿಸಿ. ಅಂಕ ಮತ್ತು ಮಿತಿಗಳನ್ನು ಸ್ಪಷ್ಟವಾಗಿ ವಿವರಿಸಿದ ಎಚ್ಚರಿಕೆಯ ಫಲಿತಾಂಶ ನಿಮಗೆ ಸಿಗುತ್ತದೆ.",
+    },
+    "chip_formats": {
+        "English": "5 audio formats",
+        "Hindi": "5 ऑडियो फ़ॉर्मैट",
+        "Tamil": "5 ஆடியோ வடிவங்கள்",
+        "Kannada": "5 ಆಡಿಯೊ ಸ್ವರೂಪಗಳು",
+    },
+    "chip_languages": {
+        "English": "16-language research model",
+        "Hindi": "16-भाषा रिसर्च मॉडल",
+        "Tamil": "16 மொழி ஆராய்ச்சி மாதிரி",
+        "Kannada": "16 ಭಾಷೆಗಳ ಸಂಶೋಧನಾ ಮಾದರಿ",
+    },
+    "chip_cautious": {
+        "English": "Three-way cautious result",
+        "Hindi": "तीन-स्तरीय सावधानीपूर्ण नतीजा",
+        "Tamil": "மூன்று நிலை எச்சரிக்கை முடிவு",
+        "Kannada": "ಮೂರು ಹಂತದ ಎಚ್ಚರಿಕೆಯ ಫಲಿತಾಂಶ",
+    },
+    "workspace_kicker": {
+        "English": "Analysis workspace",
+        "Hindi": "विश्लेषण वर्कस्पेस",
+        "Tamil": "பகுப்பாய்வு பணிப்பகுதி",
+        "Kannada": "ವಿಶ್ಲೇಷಣಾ ಕಾರ್ಯಕ್ಷೇತ್ರ",
+    },
+    "process_title": {
+        "English": "How the review works",
+        "Hindi": "समीक्षा कैसे काम करती है",
+        "Tamil": "ஆய்வு எப்படி செயல்படுகிறது",
+        "Kannada": "ಪರಿಶೀಲನೆ ಹೇಗೆ ಕಾರ್ಯನಿರ್ವಹಿಸುತ್ತದೆ",
+    },
+    "process_intro": {
+        "English": "The interface keeps input quality, model analysis, and interpretation separate.",
+        "Hindi": "इंटरफ़ेस इनपुट गुणवत्ता, मॉडल विश्लेषण और व्याख्या को अलग रखता है।",
+        "Tamil": "இந்த இடைமுகம் உள்ளீட்டுத் தரம், மாதிரி பகுப்பாய்வு மற்றும் விளக்கத்தை தனித்தனியாக வைத்திருக்கிறது.",
+        "Kannada": "ಇಂಟರ್ಫೇಸ್ ಇನ್‌ಪುಟ್ ಗುಣಮಟ್ಟ, ಮಾದರಿ ವಿಶ್ಲೇಷಣೆ ಮತ್ತು ವ್ಯಾಖ್ಯಾನವನ್ನು ಪ್ರತ್ಯೇಕವಾಗಿರಿಸುತ್ತದೆ.",
+    },
+    "step_one_title": {
+        "English": "Validate the recording",
+        "Hindi": "रिकॉर्डिंग की जांच",
+        "Tamil": "பதிவைச் சரிபார்த்தல்",
+        "Kannada": "ರೆಕಾರ್ಡಿಂಗ್ ಪರಿಶೀಲನೆ",
+    },
+    "step_one_body": {
+        "English": "Format, duration, level, and active speech are checked before loading the model.",
+        "Hindi": "मॉडल लोड होने से पहले फ़ॉर्मैट, अवधि, ध्वनि स्तर और सक्रिय भाषण जांचे जाते हैं।",
+        "Tamil": "மாதிரி ஏற்றப்படுவதற்கு முன் வடிவம், நீளம், ஒலி அளவு மற்றும் செயலில் உள்ள பேச்சு சரிபார்க்கப்படும்.",
+        "Kannada": "ಮಾದರಿಯನ್ನು ಲೋಡ್ ಮಾಡುವ ಮೊದಲು ಸ್ವರೂಪ, ಅವಧಿ, ಧ್ವನಿ ಮಟ್ಟ ಮತ್ತು ಸಕ್ರಿಯ ಮಾತನ್ನು ಪರಿಶೀಲಿಸಲಾಗುತ್ತದೆ.",
+    },
+    "step_two_title": {
+        "English": "Inspect acoustic patterns",
+        "Hindi": "ध्वनिक पैटर्न का विश्लेषण",
+        "Tamil": "ஒலியியல் வடிவங்களை ஆய்வு செய்தல்",
+        "Kannada": "ಧ್ವನಿಶಾಸ್ತ್ರೀಯ ಮಾದರಿಗಳ ಪರಿಶೀಲನೆ",
+    },
+    "step_two_body": {
+        "English": "A frozen multilingual speech encoder and classifier score synthetic-speech characteristics.",
+        "Hindi": "बहुभाषी स्पीच एन्कोडर और क्लासिफ़ायर सिंथेटिक आवाज़ की विशेषताओं को स्कोर करते हैं।",
+        "Tamil": "பலமொழி பேச்சு encoder மற்றும் classifier செயற்கைப் பேச்சின் பண்புகளை மதிப்பிடுகின்றன.",
+        "Kannada": "ಬಹುಭಾಷಾ ಸ್ಪೀಚ್ ಎನ್‌ಕೋಡರ್ ಮತ್ತು ಕ್ಲಾಸಿಫೈಯರ್ ಕೃತಕ ಮಾತಿನ ಲಕ್ಷಣಗಳಿಗೆ ಅಂಕ ನೀಡುತ್ತವೆ.",
+    },
+    "step_three_title": {
+        "English": "Present a cautious result",
+        "Hindi": "सावधानीपूर्ण नतीजा",
+        "Tamil": "எச்சரிக்கையான முடிவு",
+        "Kannada": "ಎಚ್ಚರಿಕೆಯ ಫಲಿತಾಂಶ",
+    },
+    "step_three_body": {
+        "English": "The score maps to likely genuine, inconclusive, or likely synthetic—never proof.",
+        "Hindi": "स्कोर से संभवतः असली, अनिर्णायक या संभवतः सिंथेटिक नतीजा मिलता है—यह प्रमाण नहीं है।",
+        "Tamil": "மதிப்பெண் உண்மையாக இருக்கலாம், முடிவற்றது அல்லது செயற்கையாக இருக்கலாம் எனக் காட்டும்—இது சான்று அல்ல.",
+        "Kannada": "ಅಂಕವು ಬಹುಶಃ ನೈಜ, ಅನಿಶ್ಚಿತ ಅಥವಾ ಬಹುಶಃ ಕೃತಕ ಎಂದು ಸೂಚಿಸುತ್ತದೆ—ಇದು ಪುರಾವೆಯಲ್ಲ.",
+    },
+    "session_note": {
+        "English": "Your clip is processed inside the current app session. Avoid confidential audio on a public demo URL.",
+        "Hindi": "आपकी क्लिप मौजूदा ऐप सत्र में प्रोसेस होती है। सार्वजनिक डेमो URL पर गोपनीय ऑडियो अपलोड न करें।",
+        "Tamil": "உங்கள் கிளிப் தற்போதைய பயன்பாட்டு அமர்வில் செயலாக்கப்படுகிறது. பொது demo URL-இல் ரகசிய ஆடியோவைப் பதிவேற்ற வேண்டாம்.",
+        "Kannada": "ನಿಮ್ಮ ಕ್ಲಿಪ್ ಪ್ರಸ್ತುತ ಆ್ಯಪ್ ಸೆಷನ್‌ನಲ್ಲಿ ಪ್ರಕ್ರಿಯೆಯಾಗುತ್ತದೆ. ಸಾರ್ವಜನಿಕ ಡೆಮೊ URL‌ಗೆ ಗೌಪ್ಯ ಆಡಿಯೊ ಅಪ್‌ಲೋಡ್ ಮಾಡಬೇಡಿ.",
+    },
+    "result_label": {
+        "English": "Analysis result",
+        "Hindi": "विश्लेषण नतीजा",
+        "Tamil": "பகுப்பாய்வு முடிவு",
+        "Kannada": "ವಿಶ್ಲೇಷಣಾ ಫಲಿತಾಂಶ",
+    },
+    "score_ring_label": {
+        "English": "AI signal",
+        "Hindi": "एआई संकेत",
+        "Tamil": "AI சுட்டி",
+        "Kannada": "AI ಸೂಚನೆ",
+    },
+    "interpretation_title": {
+        "English": "Interpret with care",
+        "Hindi": "सावधानी से समझें",
+        "Tamil": "கவனமாக விளக்குங்கள்",
+        "Kannada": "ಎಚ್ಚರಿಕೆಯಿಂದ ಅರ್ಥೈಸಿ",
+    },
+    "transparency_title": {
+        "English": "Model transparency",
+        "Hindi": "मॉडल पारदर्शिता",
+        "Tamil": "மாதிரி வெளிப்படைத்தன்மை",
+        "Kannada": "ಮಾದರಿ ಪಾರದರ್ಶಕತೆ",
+    },
+    "transparency_body": {
+        "English": "Noise, compression, replay, short speech, and unseen generators can materially change performance.",
+        "Hindi": "शोर, कंप्रेशन, दोबारा चलाया गया ऑडियो, छोटी स्पीच और नए जनरेटर प्रदर्शन को काफ़ी बदल सकते हैं।",
+        "Tamil": "சத்தம், சுருக்கம், மீள்பதிவு, குறுகிய பேச்சு மற்றும் காணாத உருவாக்கிகள் செயல்திறனை குறிப்பிடத்தக்க அளவில் மாற்றலாம்.",
+        "Kannada": "ಶಬ್ದ, ಕಂಪ್ರೆಷನ್, ಮರುಪ್ಲೇ, ಚಿಕ್ಕ ಮಾತು ಮತ್ತು ಕಾಣದ ಜನರೇಟರ್‌ಗಳು ಕಾರ್ಯಕ್ಷಮತೆಯನ್ನು ಗಮನಾರ್ಹವಾಗಿ ಬದಲಿಸಬಹುದು.",
+    },
+    "footer_product": {
+        "English": "Voice Guard · Indic synthetic-speech research demo",
+        "Hindi": "Voice Guard · भारतीय सिंथेटिक-स्पीच रिसर्च डेमो",
+        "Tamil": "Voice Guard · இந்திய செயற்கைப் பேச்சு ஆராய்ச்சி டெமோ",
+        "Kannada": "Voice Guard · ಭಾರತೀಯ ಕೃತಕ-ಮಾತು ಸಂಶೋಧನಾ ಡೆಮೊ",
+    },
+})
+
+# Rename the report throughout the interface: it is an automated analysis, not
+# forensic evidence.
+TRANSLATIONS["pdf_heading"] = {
+    "English": "Automated Analysis Report", "Hindi": "स्वचालित विश्लेषण रिपोर्ट",
+    "Tamil": "தானியங்கி பகுப்பாய்வு அறிக்கை", "Kannada": "ಸ್ವಯಂಚಾಲಿತ ವಿಶ್ಲೇಷಣಾ ವರದಿ",
+}
+TRANSLATIONS["pdf_button"] = {
+    "English": "Download analysis report", "Hindi": "विश्लेषण रिपोर्ट डाउनलोड करें",
+    "Tamil": "பகுப்பாய்வு அறிக்கையைப் பதிவிறக்கவும்", "Kannada": "ವಿಶ್ಲೇಷಣಾ ವರದಿಯನ್ನು ಡೌನ್‌ಲೋಡ್ ಮಾಡಿ",
+}
+TRANSLATIONS["pdf_body"] = {
+    "English": "Download a shareable record of this automated result, its input hash, and its limitations.",
+    "Hindi": "इस स्वचालित नतीजे, इनपुट हैश और इसकी सीमाओं का साझा रिकॉर्ड डाउनलोड करें।",
+    "Tamil": "இந்த தானியங்கி முடிவு, உள்ளீட்டு hash மற்றும் அதன் வரம்புகளின் பகிரக்கூடிய பதிவைப் பதிவிறக்கவும்.",
+    "Kannada": "ಈ ಸ್ವಯಂಚಾಲಿತ ಫಲಿತಾಂಶ, ಇನ್‌ಪುಟ್ hash ಮತ್ತು ಅದರ ಮಿತಿಗಳ ಹಂಚಬಹುದಾದ ದಾಖಲೆಯನ್ನು ಡೌನ್‌ಲೋಡ್ ಮಾಡಿ.",
+}
+
 
 def t(key: str, lang: str) -> str:
     """Look up a translated UI string. Falls back to English, then the raw key,

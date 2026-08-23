@@ -21,7 +21,6 @@ evaluation and produces no reportable metric.
 
 import argparse
 import io
-import json
 import sys
 
 import model_pipeline as mp
@@ -77,6 +76,15 @@ def find_one_test_clip(max_scan: int = 4000):
             print(f"  {clip_id}: decode failed ({exc}) — trying the next one")
             continue
 
+        duration = len(waveform) / sr
+        if not (
+            mp.DEFAULT_AUDIO_POLICY.min_duration_seconds
+            <= duration
+            <= mp.DEFAULT_AUDIO_POLICY.max_duration_seconds
+        ):
+            print(f"  {clip_id}: duration {duration:.2f}s outside public input policy - skipping")
+            continue
+
         print(f"Found test clip after {scanned:,} scanned: {clip_id}")
         print(f"  decoded: {len(waveform):,} samples @ {sr} Hz "
               f"({len(waveform) / sr:.2f}s)")
@@ -103,6 +111,19 @@ def main(checkpoint_dir: str = mp.CHECKPOINT_DIR, max_scan: int = 4000) -> int:
     print(f"  ground truth   : label={true_label} "
           f"({'fake' if true_label == mp.LABEL_FAKE else 'real'}), "
           f"language={true_language}")
+
+    print("\n--- invalid-input guards (must run before model inference) ---")
+    for name, invalid_bytes in (
+        ("empty upload", b""),
+        ("digital silence", encode_wav_bytes(__import__("numpy").zeros(16000), 16000)),
+    ):
+        try:
+            mp.analyze_bytes(invalid_bytes, checkpoint_dir=checkpoint_dir)
+        except mp.AudioValidationError as exc:
+            print(f"  [PASS] {name} rejected: {exc}")
+        else:
+            print(f"  [FAIL] {name} reached a verdict")
+            return 1
 
     print("\n--- first call (loads model from disk) ---")
     import time
@@ -142,7 +163,7 @@ def main(checkpoint_dir: str = mp.CHECKPOINT_DIR, max_scan: int = 4000) -> int:
           result.verdict in ("real", "uncertain", "fake"), result.verdict)
     check("confidence in [0.5, 1.0]", 0.5 <= result.confidence <= 1.0,
           f"{result.confidence:.4f}")
-    check("detected_language is 'unknown' (no classifier exists)",
+    check("detected_language is 'unknown' (no automatic classifier)",
           result.detected_language == "unknown", result.detected_language)
     check("language_eer is None (language unknown)",
           result.language_eer is None, str(result.language_eer))
@@ -150,8 +171,9 @@ def main(checkpoint_dir: str = mp.CHECKPOINT_DIR, max_scan: int = 4000) -> int:
     check("repeat call is deterministic",
           result.raw_score == result2.raw_score
           and result.audio_hash == result2.audio_hash)
-    check("model was cached (2nd call faster)", t2 < t1,
-          f"{t1:.2f}s -> {t2:.2f}s")
+    bundle1 = mp.load_inference_bundle(checkpoint_dir=checkpoint_dir)
+    bundle2 = mp.load_inference_bundle(checkpoint_dir=checkpoint_dir)
+    check("model bundle cache returns the same object", bundle1 is bundle2)
     check("calibration applied", result.metadata["calibrated"] is True,
           f"temperature={result.metadata['temperature']}")
 

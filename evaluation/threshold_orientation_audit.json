@@ -1,0 +1,104 @@
+{
+  "finding": "Historical robustness classification artifacts used the validation bonafide-score threshold as a fake-logit threshold without negating it.",
+  "validation_eer_threshold_bonafide_score": 2.1031923294067383,
+  "validation_eer_threshold_fake_logit": -2.1031923294067383,
+  "selection_warning": "The corrected validation threshold is reported for consistency; do not choose among these operating points using test accuracy.",
+  "datasets": [
+    {
+      "file": "evaluation/clean/frozen_test_predictions_with_language.csv",
+      "n": 3111,
+      "operating_points": {
+        "raw_logit_zero": {
+          "fake_logit_threshold": 0.0,
+          "accuracy": 0.9839279974284796,
+          "tn": 1553,
+          "fp": 5,
+          "fn": 45,
+          "tp": 1508
+        },
+        "historical_wrong_sign": {
+          "fake_logit_threshold": 2.1031923294067383,
+          "warning": "Bonafide-score threshold was used without negating it.",
+          "accuracy": 0.9633558341369335,
+          "tn": 1558,
+          "fp": 0,
+          "fn": 114,
+          "tp": 1439
+        },
+        "validation_eer_correct_orientation": {
+          "fake_logit_threshold": -2.1031923294067383,
+          "source": "validation EER; not selected on test accuracy",
+          "accuracy": 0.9893924783027965,
+          "tn": 1544,
+          "fp": 14,
+          "fn": 19,
+          "tp": 1534
+        }
+      }
+    },
+    {
+      "file": "evaluation/robustness/opus_16kbps_predictions.csv",
+      "n": 3111,
+      "operating_points": {
+        "raw_logit_zero": {
+          "fake_logit_threshold": 0.0,
+          "accuracy": 0.929926068788171,
+          "tn": 1356,
+          "fp": 202,
+          "fn": 16,
+          "tp": 1537
+        },
+        "historical_wrong_sign": {
+          "fake_logit_threshold": 2.1031923294067383,
+          "warning": "Bonafide-score threshold was used without negating it.",
+          "accuracy": 0.9620700739312118,
+          "tn": 1476,
+          "fp": 82,
+          "fn": 36,
+          "tp": 1517
+        },
+        "validation_eer_correct_orientation": {
+          "fake_logit_threshold": -2.1031923294067383,
+          "source": "validation EER; not selected on test accuracy",
+          "accuracy": 0.882674381227901,
+          "tn": 1200,
+          "fp": 358,
+          "fn": 7,
+          "tp": 1546
+        }
+      }
+    },
+    {
+      "file": "evaluation/robustness/musan_10db_predictions.csv",
+      "n": 3111,
+      "operating_points": {
+        "raw_logit_zero": {
+          "fake_logit_threshold": 0.0,
+          "accuracy": 0.7084538733526198,
+          "tn": 1067,
+          "fp": 491,
+          "fn": 416,
+          "tp": 1137
+        },
+        "historical_wrong_sign": {
+          "fake_logit_threshold": 2.1031923294067383,
+          "warning": "Bonafide-score threshold was used without negating it.",
+          "accuracy": 0.7168113146898103,
+          "tn": 1214,
+          "fp": 344,
+          "fn": 537,
+          "tp": 1016
+        },
+        "validation_eer_correct_orientation": {
+          "fake_logit_threshold": -2.1031923294067383,
+          "source": "validation EER; not selected on test accuracy",
+          "accuracy": 0.6936676309868209,
+          "tn": 911,
+          "fp": 647,
+          "fn": 306,
+          "tp": 1247
+        }
+      }
+    }
+  ]
+}

@@ -10,8 +10,12 @@
 # audit (Playwright + Chromium), not assumed.
 [theme]
 base = "light"
-primaryColor = "#1A1A1A"
-backgroundColor = "#FFFDF5"
-secondaryBackgroundColor = "#FFF3C4"
-textColor = "#1A1A1A"
+primaryColor = "#665CF6"
+backgroundColor = "#F6F7FB"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#111827"
 font = "sans-serif"
+
+[server]
+maxUploadSize = 25
+maxMessageSize = 25

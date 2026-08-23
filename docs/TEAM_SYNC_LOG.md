@@ -18,3 +18,9 @@
 **Blocking Ashitha on:** nothing — evaluate_dataset() ready for robustness matrix / IndicSynth use
 **Waiting on Ashitha for:** robustness matrix results, IndicSynth cross-dataset check (important — will confirm whether 1.00-1.03% EER generalizes)
 **Numbers to report:** Test EER 1.03%, Validation EER 1.00%, per-language breakdown in docs/TEST_SET_RESULTS.md
+
+### SYNC HANDOFF - Correctness and v2 protocol - 2026-08-23
+**Interface changes:** `analyze_bytes()` now validates encoded size, duration, finite samples, signal energy, and estimated active speech before loading the model. Automatic language ID was removed; `language_eer` is retained only as a deprecated compatibility field and remains `None`. Results include an explicit decision-policy ID, audio-quality measurements, and both validation-threshold orientations.
+**Evaluation correction:** the historical v1 exact IDs are disjoint, but source-family proxy overlap is extensive (roughly 98-99% of clips across split pairs). New training and test evaluation require a group-disjoint v2 split. Per-language test EER is benchmark-only and is no longer presented as per-clip risk.
+**UI/report correction:** selected-audio hashes now clear stale results, uploads have preview/limits, errors are sanitized, and the PDF is named an Automated Analysis Report with permanent limitations and safety guidance.
+**Model work:** three validation-only head ablations and optional cached-feature robustness augmentation are available. No new accuracy claim is made until v2 experiments are run.

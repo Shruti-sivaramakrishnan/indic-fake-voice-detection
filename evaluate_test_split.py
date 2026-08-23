@@ -30,7 +30,7 @@ Step 6 does.
 
 On a full (non-rehearsal) run this writes:
     docs/TEST_SET_RESULTS.md              pooled + per-language metrics
-    checkpoints/per_language_eer.json     consumed by analyze_bytes()
+    checkpoints/per_language_test_metrics.json (benchmark only)
     docs/error_analysis/fp_clips.csv      real clips misclassified as fake
     docs/error_analysis/fn_clips.csv      fake clips misclassified as real
 
@@ -41,6 +41,7 @@ confusion matrix cells before writing).
 """
 
 import argparse
+import hashlib
 import sys
 from typing import Optional
 
@@ -51,7 +52,9 @@ def main(
     checkpoint_dir: str = mp.CHECKPOINT_DIR,
     cache_dir: str = mp.FEATURE_CACHE_DIR,
     repo_dir: str = mp.REPO_ROOT,
-    decision_threshold: float = 0.5,
+    split_file: str = mp.SPLIT_FILE,
+    metadata_file: str = mp.METADATA_FILE,
+    decision_threshold: Optional[float] = None,
     extract_batch_size: int = 8,
     min_language_support: int = 50,
     max_clips: Optional[int] = None,
@@ -71,8 +74,11 @@ def main(
 
     # --- guards, same as Step 6 --------------------------------------------
     print("[1/4] Verifying frozen split integrity...")
-    mp.assert_split_integrity()
-    print("  OK — 31,102 clips, no duplicates, no cross-split overlap.\n")
+    splits = mp.load_frozen_split(split_file)
+    mp.assert_split_integrity(splits, require_group_disjoint=True)
+    metadata = mp.load_verified_metadata(metadata_file)
+    mp.assert_split_coverage(splits, metadata)
+    print("  OK - groups are disjoint and every language/label is represented.\n")
 
     print("[2/4] Verifying frontend is frozen...")
     n_trainable = mp.verify_frontend_frozen()
@@ -80,8 +86,8 @@ def main(
 
     # --- build the test clip_ids/labels/languages from frozen metadata -----
     print("[3/4] Loading frozen TEST split and verified metadata...")
-    _, _, test_ids = mp.load_frozen_split_sets()
-    label_lookup, language_lookup = mp.build_label_lookup()
+    _, _, test_ids = mp.load_frozen_split_sets(split_file)
+    label_lookup, language_lookup = mp.build_label_lookup(metadata)
 
     clip_ids = sorted(test_ids)   # deterministic order
     if max_clips is not None:
@@ -104,14 +110,16 @@ def main(
         language_lookup=language_lookup,
         decision_threshold=decision_threshold,
         extract_batch_size=extract_batch_size,
-        # This run is exactly the intended source of truth for per-language EER
-        # -- write it so analyze_bytes() stops returning language_eer=None for
-        # every known language.
+        # Aggregate benchmark artifact only. It is intentionally never consumed
+        # as an individual clip's confidence or risk estimate.
         write_language_eer_file=(max_clips is None),
         # Per-clip records feed the error-analysis CSVs below. Skipped on a
         # rehearsal since those results aren't written anywhere anyway.
         include_per_clip=(max_clips is None),
     )
+    with open(split_file, "rb") as split_stream:
+        result["split_sha256"] = hashlib.sha256(split_stream.read()).hexdigest()
+    result["split_protocol"] = "v2-group-disjoint"
 
     # --- report ---------------------------------------------------------------
     pooled = result["pooled"]
@@ -158,22 +166,12 @@ def main(
             f"FN={cm['fn']}=={error_paths['n_fn']})"
         )
 
-        print("\nNext action — commit:")
-        print(f"  cd {repo_dir}")
-        print("  git add docs/TEST_SET_RESULTS.md docs/error_analysis/")
-        print(f'  git commit -m "Test set results: EER {eer_str}"')
-        print("  git push origin main")
-        print(
-            "\n  (git identity for this repo is Shruti <shruti@example.com> — "
-            "verify with `git config --local --list | grep user` before "
-            "committing if you're in a fresh environment. Push directly to "
-            "main, not a claude/* branch.)"
-        )
+        print("\nReview every generated artifact before any commit or push.")
         result["results_path"] = results_path
         result["error_analysis_paths"] = error_paths
     else:
         print("\nREHEARSAL run (--max-clips set) — no results file, "
-              "no per_language_eer.json, no error-analysis CSVs written. "
+              "no per-language benchmark JSON, no error-analysis CSVs written. "
               "Not reportable.")
 
     print("=" * 64)
@@ -185,7 +183,14 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint-dir", default=mp.CHECKPOINT_DIR)
     parser.add_argument("--cache-dir", default=mp.FEATURE_CACHE_DIR)
     parser.add_argument("--repo-dir", default=mp.REPO_ROOT)
-    parser.add_argument("--decision-threshold", type=float, default=0.5)
+    parser.add_argument("--split-file", default=mp.SPLIT_FILE)
+    parser.add_argument("--metadata-file", default=mp.METADATA_FILE)
+    parser.add_argument(
+        "--decision-threshold",
+        type=float,
+        default=None,
+        help="P(fake) threshold. Defaults to the validation EER operating point.",
+    )
     parser.add_argument("--extract-batch-size", type=int, default=8)
     parser.add_argument("--min-language-support", type=int, default=50)
     parser.add_argument(
@@ -198,6 +203,8 @@ if __name__ == "__main__":
         checkpoint_dir=args.checkpoint_dir,
         cache_dir=args.cache_dir,
         repo_dir=args.repo_dir,
+        split_file=args.split_file,
+        metadata_file=args.metadata_file,
         decision_threshold=args.decision_threshold,
         extract_batch_size=args.extract_batch_size,
         min_language_support=args.min_language_support,

@@ -1,5 +1,9 @@
 # Test Set Results — Model Pipeline
 
+> **Historical v1 result - not a current generalization claim.** Exact clip IDs are disjoint, but the repaired leakage audit finds source-family proxy overlap across every split pair: 24,396/24,881 train clips and 3,090/3,111 test clips belong to families present on both sides. This v1 test set has also been observed and must not be used for further model, threshold, or augmentation selection. Future reportable results require the group-disjoint v2 protocol.
+
+> The accuracy/confusion matrix below used `P(fake) > 0.5`. It did not use the validation EER threshold. Historical robustness artifacts also applied the saved bonafide-score threshold with the wrong sign in fake-logit space; regenerate those artifacts for v2 with the repaired evaluator.
+
 _Generated 2026-08-17 09:47:27 by `evaluate_test_split.py`, via `model_pipeline.evaluate_dataset()`._
 
 **This is the frozen TEST split — the one Step 6 never touched during training or model selection. It should be evaluated exactly once, after every training/hyperparameter decision is final. If you are looking at this file wondering whether to go change something in Step 6 and re-run this — don't; that turns the test set into a second validation set.**
@@ -26,7 +30,9 @@ _Generated 2026-08-17 09:47:27 by `evaluate_test_split.py`, via `model_pipeline.
 - Evaluated: 3,111
 - Missing (decode failure or absent from stream): 0
 
-## Per-language EER
+## Per-language test EER (aggregate benchmark only)
+
+These values describe buckets in this historical test split. They are not an individual upload's confidence or risk estimate and are no longer displayed in the UI/PDF.
 
 | language | n | n_real | n_fake | EER | support |
 |---|---|---|---|---|---|

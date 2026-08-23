@@ -1,206 +1,194 @@
+"""Audit exact IDs, source-family proxies, and degraded-audio lineage.
 
+The original audit checked only exact clip IDs. That is necessary but not
+sufficient: clips with the same source/emotion/speaker-like ID prefix are spread
+across all three v1 splits. This audit makes that limitation visible and fails by
+default until a group-disjoint v2 split is supplied.
+"""
+
+from __future__ import annotations
+
+import argparse
 import json
-import os
+import re
 from collections import Counter
-
-SPLIT_FILE = "data_pipeline/split_ids.json"
-
-
-def load_splits():
-    """Load the frozen split. Never regenerate it."""
-    
-    if not os.path.exists(SPLIT_FILE):
-        raise FileNotFoundError(
-            f"Frozen split not found: {SPLIT_FILE}"
-        )
-
-    with open(SPLIT_FILE, "r", encoding="utf-8") as f:
-        splits = json.load(f)
-
-    required = {"train", "validation", "test"}
-
-    if set(splits.keys()) != required:
-        raise ValueError(
-            f"Expected split keys {required}, "
-            f"found {set(splits.keys())}"
-        )
-
-    return splits
+from pathlib import Path
+from typing import Dict, Iterable, List
 
 
-def check_duplicate_ids(splits):
-    """Check for duplicate clip IDs within each split."""
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_SPLIT_FILE = REPO_ROOT / "data_pipeline" / "split_ids.json"
+EXPECTED_TOTAL = 31_102
+SPLIT_NAMES = ("train", "validation", "test")
 
-    print("\n=== DUPLICATE ID CHECK ===")
+
+def load_splits(path: Path) -> Dict[str, List[str]]:
+    if not path.exists():
+        raise FileNotFoundError(f"Frozen split not found: {path}")
+    splits = json.loads(path.read_text(encoding="utf-8"))
+    if set(splits) != set(SPLIT_NAMES):
+        raise ValueError(f"Expected split keys {set(SPLIT_NAMES)}, found {set(splits)}")
+    return {name: [str(value) for value in splits[name]] for name in SPLIT_NAMES}
+
+
+def id_family(clip_id: str) -> str:
+    """Conservative source-family proxy: remove only the trailing clip number."""
+    return re.sub(r"[_-]?\d+$", "", clip_id.strip()).casefold()
+
+
+def check_exact_ids(splits: Dict[str, List[str]], expected_total: int) -> bool:
+    passed = True
+    sets = {name: set(values) for name, values in splits.items()}
+    print("\n=== EXACT ID INTEGRITY ===")
+    for name, values in splits.items():
+        duplicates = [key for key, count in Counter(values).items() if count > 1]
+        print(f"{name:<10}: {len(values):>6,} rows, {len(duplicates):>3} duplicates")
+        passed = passed and not duplicates
+
+    for index, left in enumerate(SPLIT_NAMES):
+        for right in SPLIT_NAMES[index + 1 :]:
+            overlap = sets[left] & sets[right]
+            print(f"{left} intersect {right}: {len(overlap):,} exact IDs")
+            passed = passed and not overlap
+
+    unique = set().union(*sets.values())
+    print(f"Unique IDs: {len(unique):,} (expected {expected_total:,})")
+    return passed and len(unique) == expected_total
+
+
+def check_group_overlap(splits: Dict[str, List[str]]) -> bool:
+    print("\n=== SOURCE-FAMILY PROXY OVERLAP ===")
+    families = {
+        name: {id_family(clip_id) for clip_id in values}
+        for name, values in splits.items()
+    }
+    passed = True
+    for index, left in enumerate(SPLIT_NAMES):
+        for right in SPLIT_NAMES[index + 1 :]:
+            shared = families[left] & families[right]
+            left_clips = sum(id_family(value) in shared for value in splits[left])
+            right_clips = sum(id_family(value) in shared for value in splits[right])
+            print(
+                f"{left} vs {right}: {len(shared):,} shared families; "
+                f"{left_clips:,}/{len(splits[left]):,} {left} clips and "
+                f"{right_clips:,}/{len(splits[right]):,} {right} clips belong "
+                "to shared families"
+            )
+            if shared:
+                print(f"  examples: {', '.join(sorted(shared)[:5])}")
+                passed = False
+    return passed
+
+
+def _manifest_paths() -> Iterable[Path]:
+    degraded = REPO_ROOT / "data_pipeline" / "degraded"
+    return sorted(degraded.glob("*.jsonl")) if degraded.exists() else []
+
+
+def check_degraded_lineage(splits: Dict[str, List[str]]) -> bool:
+    print("\n=== DEGRADED-AUDIO LINEAGE ===")
+    owner = {
+        clip_id: split_name
+        for split_name, clip_ids in splits.items()
+        for clip_id in clip_ids
+    }
+    paths = list(_manifest_paths())
+    if not paths:
+        print("No degraded manifests found.")
+        return True
 
     passed = True
-
-    for split_name, ids in splits.items():
-
-        counts = Counter(ids)
-        duplicates = [
-            clip_id
-            for clip_id, count in counts.items()
-            if count > 1
-        ]
-
-        if duplicates:
-            print(
-                f"FAIL: {split_name} contains "
-                f"{len(duplicates)} duplicate IDs."
-            )
-            passed = False
-        else:
-            print(
-                f"PASS: {split_name} contains "
-                f"no duplicate IDs."
-            )
-
+    seen = set()
+    for path in paths:
+        rows = 0
+        errors = []
+        with path.open("r", encoding="utf-8") as stream:
+            for line_number, line in enumerate(stream, start=1):
+                if not line.strip():
+                    continue
+                rows += 1
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    errors.append(f"line {line_number}: invalid JSON ({exc})")
+                    continue
+                clip_id = str(row.get("id", ""))
+                declared_split = str(row.get("split", ""))
+                degradation = str(row.get("degradation", ""))
+                key = (clip_id, degradation)
+                if clip_id not in owner:
+                    errors.append(f"line {line_number}: unknown id {clip_id!r}")
+                elif declared_split != owner[clip_id]:
+                    errors.append(
+                        f"line {line_number}: {clip_id} declared {declared_split}, "
+                        f"belongs to {owner[clip_id]}"
+                    )
+                if key in seen:
+                    errors.append(f"line {line_number}: duplicate lineage {key}")
+                seen.add(key)
+        print(f"{path.name}: {rows:,} rows, {len(errors):,} lineage errors")
+        for error in errors[:5]:
+            print(f"  {error}")
+        passed = passed and not errors
     return passed
 
 
-def check_split_overlap(splits):
-    """Check that no clip ID occurs in multiple splits."""
-
-    print("\n=== CROSS-SPLIT OVERLAP CHECK ===")
-
-    train_ids = set(splits["train"])
-    val_ids = set(splits["validation"])
-    test_ids = set(splits["test"])
-
-    train_val = train_ids & val_ids
-    train_test = train_ids & test_ids
-    val_test = val_ids & test_ids
-
-    print("Train ∩ Validation:", len(train_val))
-    print("Train ∩ Test:", len(train_test))
-    print("Validation ∩ Test:", len(val_test))
-
-    passed = (
-        len(train_val) == 0
-        and len(train_test) == 0
-        and len(val_test) == 0
-    )
-
-    if passed:
-        print("PASS: No clip ID crosses split boundaries.")
+def run_audit(
+    split_file: Path = DEFAULT_SPLIT_FILE,
+    expected_total: int = EXPECTED_TOTAL,
+    allow_group_overlap: bool = False,
+) -> bool:
+    print("=" * 72)
+    print("VOICE GUARD SPLIT AND LINEAGE AUDIT")
+    print("=" * 72)
+    print(f"Split: {split_file}")
+    splits = load_splits(split_file)
+    exact_ok = check_exact_ids(splits, expected_total)
+    groups_ok = check_group_overlap(splits)
+    if split_file.resolve() == DEFAULT_SPLIT_FILE.resolve():
+        lineage_ok = check_degraded_lineage(splits)
     else:
-        print("FAIL: Split leakage detected.")
+        print("\n=== DEGRADED-AUDIO LINEAGE ===")
+        print(
+            "Skipped legacy v1 degraded manifests for this alternate split. "
+            "Regenerate augmentations from the new split before training."
+        )
+        lineage_ok = True
 
+    historical_exception = False
+    if not groups_ok and allow_group_overlap:
+        print("\nWARNING: group overlap was explicitly allowed for historical v1 review.")
+        groups_ok = True
+        historical_exception = True
+
+    passed = exact_ok and groups_ok and lineage_ok
+    print("\n" + "=" * 72)
+    if passed and historical_exception:
+        print("PASS WITH EXCEPTION: exact IDs/lineage pass; known v1 group overlap remains.")
+    elif passed:
+        print("PASS: split is exact-ID and group-disjoint.")
+    else:
+        print("FAIL: split is not safe for a new reportable training run.")
+    print("=" * 72)
     return passed
-
-
-def check_total_ids(splits):
-    """Check that all expected IDs are accounted for."""
-
-    print("\n=== TOTAL ID CHECK ===")
-
-    train_ids = set(splits["train"])
-    val_ids = set(splits["validation"])
-    test_ids = set(splits["test"])
-
-    all_ids = train_ids | val_ids | test_ids
-
-    print("Train IDs:", len(train_ids))
-    print("Validation IDs:", len(val_ids))
-    print("Test IDs:", len(test_ids))
-    print("Unique IDs:", len(all_ids))
-
-    expected_total = 31102
-
-    if len(all_ids) == expected_total:
-        print(
-            f"PASS: All {expected_total:,} expected "
-            f"clip IDs are accounted for."
-        )
-        return True
-
-    print(
-        f"FAIL: Expected {expected_total:,} unique IDs "
-        f"but found {len(all_ids):,}."
-    )
-    return False
-
-
-def check_degraded_files(splits):
-    """
-    Future leakage check.
-
-    Once degraded/augmented audio exists, each degraded file
-    must inherit the split of its original clip.
-
-    This function currently reports that no degraded-audio
-    directory has been created yet.
-    """
-
-    print("\n=== DEGRADED/AUGMENTED FILE CHECK ===")
-
-    degraded_dirs = [
-        "data_pipeline/degraded",
-        "data_pipeline/degraded_audio",
-        "data_pipeline/augmented",
-        "data_pipeline/augmented_audio",
-    ]
-
-    existing_dirs = [
-        directory
-        for directory in degraded_dirs
-        if os.path.exists(directory)
-    ]
-
-    if not existing_dirs:
-        print(
-            "PASS: No degraded/augmented audio exists yet."
-        )
-        print(
-            "This check must be rerun after Step 6."
-        )
-        return True
-
-    print("Found degraded/augmented directories:")
-    for directory in existing_dirs:
-        print(" -", directory)
-
-    print(
-        "\nManual/metadata-based degraded-file audit "
-        "will be performed after Step 6."
-    )
-
-    return True
-
-
-def run_audit():
-
-    print("=" * 60)
-    print("FROZEN SPLIT LEAKAGE AUDIT")
-    print("=" * 60)
-
-    splits = load_splits()
-
-    duplicate_check = check_duplicate_ids(splits)
-    overlap_check = check_split_overlap(splits)
-    total_check = check_total_ids(splits)
-    degraded_check = check_degraded_files(splits)
-
-    print("\n" + "=" * 60)
-    print("FINAL AUDIT RESULT")
-    print("=" * 60)
-
-    if all([
-        duplicate_check,
-        overlap_check,
-        total_check,
-        degraded_check
-    ]):
-        print("✅ LEAKAGE AUDIT PASSED")
-    else:
-        print("❌ LEAKAGE AUDIT FAILED")
-
-        raise SystemExit(
-            "Leakage audit failed. "
-            "Do not continue until the issue is fixed."
-        )
 
 
 if __name__ == "__main__":
-    run_audit()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--split-file", type=Path, default=DEFAULT_SPLIT_FILE)
+    parser.add_argument("--expected-total", type=int, default=EXPECTED_TOTAL)
+    parser.add_argument(
+        "--allow-known-v1-group-overlap",
+        action="store_true",
+        help="Allow the known proxy-family overlap only for historical v1 review.",
+    )
+    args = parser.parse_args()
+    raise SystemExit(
+        0
+        if run_audit(
+            args.split_file,
+            args.expected_total,
+            allow_group_overlap=args.allow_known_v1_group_overlap,
+        )
+        else 1
+    )

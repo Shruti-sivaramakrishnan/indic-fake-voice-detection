@@ -1,19 +1,12 @@
-# Streamlit demo (app.py) + the model_pipeline.py inference path it calls
-# (analyze_bytes -> frozen frontend -> AASIST head).
-#
-# NOT included here: `datasets` and `scikit-learn`, which model_pipeline.py
-# only imports lazily inside the training/evaluation functions (streaming,
-# EER) that the demo app never calls. Install them separately if you're also
-# running evaluate_test_split.py or Step 6 training in this environment.
-
-streamlit>=1.36
-torch>=2.0
-transformers>=4.30
-numpy
-soundfile                # primary audio decode path in decode_audio_bytes()
-torchaudio                # resampling fallback + non-wav decode fallback
-pydub                    # MP3/OGG/M4A fallback decode in decode_audio_bytes()
-librosa                  # dependency for pydub audio processing
-reportlab                # PDF generation for Evidence Report (Ashitha's feature)
-truststore               # SSL certificate handling for secure HTTPS connections in app.py
-speechbrain>=0.5.12      # VoxLingua107 language identification (~85MB model, faster than MMS-LID)
+# Runtime dependencies for app.py and analyze_bytes(). Upper bounds prevent a
+# new major release from silently changing the public Kaggle demo. Torch and
+# torchaudio must resolve to the same release family.
+streamlit>=1.40,<2
+torch>=2.2,<3
+torchaudio>=2.2,<3
+transformers>=4.40,<6
+numpy>=1.26,<3
+soundfile>=0.12,<1
+pydub>=0.25,<1
+reportlab>=4.0,<5
+truststore>=0.9,<1

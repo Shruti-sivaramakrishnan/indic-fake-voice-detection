@@ -1,692 +1,502 @@
-"""
-Theming and self-contained HTML/CSS/JS snippets for the Streamlit demo (app.py).
-
-Palette: yellow + white + black, with two semantic accents (success=green,
-warning/error=amber) — every text/background pair below was checked against
-WCAG contrast requirements (4.5:1 for text, 3:1 for UI-component borders)
-before being used; see the comment above PALETTE.
-
-Split between two delivery mechanisms, on purpose:
-
-  * Static page chrome (base background, pill-button hover sweep on
-    st.button(type="primary"), st.pills reskin, alert cards) is injected as
-    <style> into the MAIN document via st.markdown(unsafe_allow_html=True).
-    This is the only way to theme Streamlit's own real widgets — an iframe
-    (components.v1.html) can't reach outside itself to style them, and CSS
-    :hover/transitions on real DOM elements work identically regardless of
-    where the <style> tag lives.
-
-  * Everything animated/decorative that does NOT need to feed a value back to
-    Python — the landing illustration + panic dramatization, the hamster-wheel
-    loader, the WhatsApp "coming soon" scroll-reveal card — is built as a
-    fully self-contained HTML document and rendered via
-    st.components.v1.html(), per the brief's instruction, since these need
-    real CSS keyframe animation (and one small JS scroll listener) that has
-    no equivalent in native Streamlit widgets.
-
-  * The one deliberate exception: the decorative background pattern is STATIC
-    (no hover/keyframes), and a page-spanning background is a main-document
-    concern by nature — an iframe is a bounded rectangle, not a layer that can
-    sit behind the rest of the page. So it lives in the main-document CSS
-    (BASE_STYLES) via a low-alpha repeating-radial-gradient, not in a
-    components.html snippet. No actual pattern asset files were shared in
-    this conversation, so this is a generated substitute — swap
-    `_BACKGROUND_PATTERN_CSS` for a real asset later if you have one.
-"""
+"""Visual system and small HTML helpers for the Voice Guard Streamlit app."""
 
 from __future__ import annotations
 
-# ---------------------------------------------------------------------------
-# Palette — verified against WCAG contrast (see model_pipeline.py sibling
-# scratch check; ratios: black/cream 17.1:1, black/yellow 12.6:1,
-# white/black-pill 17.4:1, success-text/success-bg 10.0:1, amber-text/amber-bg
-# 9.9:1, success-border/success-bg 3.1:1, amber-border/amber-bg 4.2:1 — all
-# pass their respective 4.5:1 text / 3:1 UI-component thresholds).
-# ---------------------------------------------------------------------------
-PALETTE = {
-    "bg_cream": "#FFFDF5",
-    "bg_yellow": "#FFD93D",
-    "bg_yellow_soft": "#FFF3C4",
-    "black": "#1A1A1A",
-    "white": "#FFFFFF",
-    "text_muted_light": "#6B6350",   # secondary text on cream/white
-    "text_muted_yellow": "#4A4326",  # secondary text on yellow (darker, same hue family)
-    "success_bg": "#EAF6EC",
-    "success_border": "#2F9E44",
-    "success_text": "#1B4332",
-    "amber_bg": "#FFF3D6",
-    "amber_border": "#B85C00",
-    "amber_text": "#5A3400",
+
+BASE_STYLES = r"""
+:root {
+  --vg-ink: #111827;
+  --vg-muted: #667085;
+  --vg-soft-muted: #98a2b3;
+  --vg-line: #e4e7ec;
+  --vg-surface: #ffffff;
+  --vg-canvas: #f6f7fb;
+  --vg-brand: #665cf6;
+  --vg-brand-dark: #4f46d9;
+  --vg-brand-soft: #efeeff;
+  --vg-navy: #101828;
+  --vg-success: #079455;
+  --vg-success-soft: #ecfdf3;
+  --vg-warning: #dc6803;
+  --vg-warning-soft: #fff6ed;
+  --vg-danger: #d92d20;
+  --vg-danger-soft: #fff1f0;
+  --vg-shadow: 0 18px 50px rgba(16, 24, 40, 0.08);
 }
 
-CSS_VARS_BLOCK = ":root {\n" + "\n".join(
-    f"  --{k.replace('_', '-')}: {v};" for k, v in PALETTE.items()
-) + "\n}\n"
-
-
-# A static, low-alpha dot grid — decorative only, no motion. See module
-# docstring for why this lives here instead of in a components.html snippet.
-_BACKGROUND_PATTERN_CSS = """
-.stApp {
-  background-color: var(--bg-cream);
-  background-image:
-    radial-gradient(circle, rgba(26,26,26,0.05) 1.6px, transparent 1.6px);
-  background-size: 26px 26px;
-  background-position: 0 0;
-}
-"""
-
-BASE_STYLES = CSS_VARS_BLOCK + _BACKGROUND_PATTERN_CSS + """
 html, body, [class*="css"] {
-  font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
-/* ============================================================================
-   TEXT-COLOR INVARIANT: dark bg -> light text, light bg -> dark text, no
-   exceptions, enforced PER COMPONENT (not one global rule).
+body, .stApp { color: var(--vg-ink); }
+.stApp {
+  background:
+    radial-gradient(circle at 9% 4%, rgba(102, 92, 246, 0.10), transparent 25rem),
+    radial-gradient(circle at 93% 18%, rgba(14, 165, 233, 0.08), transparent 28rem),
+    var(--vg-canvas);
+}
 
-   Why per-component: Streamlit wraps widget labels in nested markdown
-   containers (e.g. a button's visible text sits in a `<p>` several levels
-   inside the `<button>`). A single blanket rule like `p { color: black }`
-   directly matches THAT inner `<p>` too and overrides the button's correctly
-   INHERITED white text -- confirmed via a real rendered-DOM audit
-   (Playwright + Chromium): a `button[kind="primary"]` correctly had
-   `color: white` on itself, but its inner `<p>` showed `color: rgb(26,26,26)`
-   (black-on-black-background, i.e. invisible), entirely because of that one
-   overbroad rule. There is no blanket-selector fix for this: Streamlit reuses
-   the same markdown-wrapper structure everywhere, inside buttons and outside
-   them, so nothing about the WRAPPER distinguishes context.
+[data-testid="stHeader"] { height: 0; background: transparent; }
+[data-testid="stToolbar"],
+[data-testid="stDecoration"],
+[data-testid="stSidebarCollapsedControl"] { display: none !important; }
+#MainMenu, footer { visibility: hidden; }
+[data-testid="stAppViewContainer"] > .main .block-container {
+  max-width: 1180px;
+  padding-top: 1.35rem;
+  padding-bottom: 3rem;
+}
 
-   The fix: set a single default at the top (inherited downward, not
-   re-matched by a bare tag selector), then for every component that needs a
-   DIFFERENT color, force it with `!important` on the component root AND
-   `* ` (all descendants) -- so it wins regardless of how many wrapper levels
-   Streamlit inserts.
-
-   `.streamlit/config.toml` also forces Streamlit's own theme to light, which
-   fixes a SEPARATE bug: several native widget containers (file uploader,
-   selectbox, expander) paint themselves with Streamlit's own dark-theme
-   background when the visitor's OS/browser prefers dark, while this CSS
-   assumes a light page -- also confirmed via the same audit, in dark
-   color-scheme specifically. Both fixes are needed; they cover different
-   failure modes.
-   ============================================================================ */
-
-/* ---- default: set once, inherited down, never re-matched by a bare tag */
-body, .stApp { color: var(--black); }
-h1, h2, h3, h4 { color: var(--black); font-weight: 800; letter-spacing: -0.01em; }
-.subtle { color: var(--text-muted-light); }
-
-/* Streamlit sets its own explicit color on these; force ours on every
-   descendant so it isn't left in a theme-dependent state. */
+h1, h2, h3, h4 { color: var(--vg-ink); letter-spacing: -0.03em; }
 [data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] * {
-  color: var(--text-muted-light) !important;
-}
-[data-testid="stExpander"] summary, [data-testid="stExpander"] summary * {
-  color: var(--black) !important;
-}
-[data-testid="stWidgetLabel"], [data-testid="stWidgetLabel"] * {
-  color: var(--black) !important;
-}
-[data-testid="stFileUploaderDropzoneInstructions"],
-[data-testid="stFileUploaderDropzoneInstructions"] * {
-  color: var(--text-muted-light) !important;
+  color: var(--vg-muted) !important;
 }
 
-/* ---- primary pill buttons (CTA / Submit) ------------------------------
-   Real st.button(type="primary"), reskinned. :hover/transition work exactly
-   the same on injected CSS as anywhere else -- the "can't do this natively"
-   limitation is about Streamlit exposing no animation API, not about CSS
-   itself failing to apply. */
-[data-testid="stButton"] button[kind="primary"],
-[data-testid="stButton"] button[kind="primary"] * {
-  color: var(--white) !important;
+/* Top navigation */
+.vg-topbar {
+  display: flex;
+  align-items: center;
+  min-height: 46px;
 }
-[data-testid="stButton"] button[kind="primary"] {
+.vg-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.72rem;
+  color: var(--vg-navy);
+  font-weight: 780;
+  font-size: 1.08rem;
+  letter-spacing: -0.02em;
+}
+.vg-brand-mark {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 12px;
+  color: white;
+  background: linear-gradient(145deg, #7c72ff, #5147dd);
+  box-shadow: 0 8px 20px rgba(102, 92, 246, 0.25);
+}
+.vg-brand-mark svg { width: 22px; height: 22px; }
+.vg-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  margin-top: 0.6rem;
+  color: #475467;
+  font-size: 0.78rem;
+  font-weight: 650;
+}
+.vg-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: #12b76a;
+  box-shadow: 0 0 0 4px rgba(18, 183, 106, 0.11);
+}
+
+/* Language control */
+[data-testid="stSelectbox"] { margin-top: 0.15rem; }
+[data-testid="stSelectbox"] [data-baseweb="select"] > div {
+  min-height: 42px;
+  background: rgba(255,255,255,0.9) !important;
+  border: 1px solid var(--vg-line) !important;
+  border-radius: 12px !important;
+  box-shadow: 0 3px 12px rgba(16,24,40,0.04);
+}
+[data-testid="stSelectbox"] [data-baseweb="select"] * { color: var(--vg-ink) !important; }
+
+/* Hero */
+.vg-hero {
   position: relative;
   overflow: hidden;
-  background: var(--black) !important;
-  border: none !important;
-  border-radius: 999px !important;
-  padding: 0.7em 2.2em !important;
-  font-weight: 700 !important;
-  font-size: 1.05rem !important;
-  letter-spacing: 0.01em;
-  box-shadow: 0 2px 0 rgba(26,26,26,0.15);
-  transition: transform 0.15s ease, box-shadow 0.15s ease;
+  margin: 1.15rem 0 1.6rem;
+  padding: clamp(2rem, 5vw, 4.2rem);
+  border: 1px solid rgba(255,255,255,0.10);
+  border-radius: 30px;
+  color: white;
+  background:
+    radial-gradient(circle at 82% 15%, rgba(125, 211, 252, 0.20), transparent 19rem),
+    radial-gradient(circle at 72% 110%, rgba(124, 114, 255, 0.48), transparent 24rem),
+    linear-gradient(132deg, #0d1426 4%, #18213b 56%, #24204f 100%);
+  box-shadow: 0 28px 70px rgba(16, 24, 40, 0.16);
 }
-[data-testid="stButton"] button[kind="primary"]::after {
+.vg-hero::after {
   content: "";
   position: absolute;
-  top: 0; left: -60%;
-  width: 40%; height: 100%;
-  background: linear-gradient(120deg, transparent, rgba(255,217,61,0.55), transparent);
-  transform: skewX(-20deg);
-  transition: left 0.55s ease;
+  width: 330px;
+  height: 330px;
+  right: -110px;
+  top: -150px;
+  border: 1px solid rgba(255,255,255,0.10);
+  border-radius: 50%;
+  box-shadow: 0 0 0 42px rgba(255,255,255,0.025), 0 0 0 84px rgba(255,255,255,0.018);
 }
-[data-testid="stButton"] button[kind="primary"]:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 4px 0 rgba(26,26,26,0.18);
+.vg-eyebrow {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 1.2rem;
+  color: #c7d7fe;
+  font-size: 0.72rem;
+  font-weight: 750;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
 }
-[data-testid="stButton"] button[kind="primary"]:hover::after { left: 120%; }
-[data-testid="stButton"] button[kind="primary"]:active { transform: translateY(0); }
-
-/* ---- tertiary buttons: the small circular arrow-nav controls ---------- */
-[data-testid="stButton"] button[kind="tertiary"],
-[data-testid="stButton"] button[kind="tertiary"] * {
-  color: var(--black) !important;
+.vg-eyebrow::before {
+  content: "";
+  width: 22px;
+  height: 1px;
+  background: #9aa4ff;
 }
-[data-testid="stButton"] button[kind="tertiary"] {
-  background: var(--white) !important;
-  border: 2px solid var(--black) !important;
-  border-radius: 999px !important;
-  min-width: 2.6em !important;
-  height: 2.6em !important;
-  padding: 0 !important;
-  font-size: 1.25rem !important;
-  font-weight: 700 !important;
-  line-height: 1 !important;
-  transition: background 0.15s ease, transform 0.15s ease;
+.vg-hero h1 {
+  position: relative;
+  z-index: 1;
+  max-width: 760px;
+  margin: 0;
+  color: white;
+  font-size: clamp(2.15rem, 5.5vw, 4.3rem);
+  line-height: 1.01;
+  font-weight: 760;
+  letter-spacing: -0.055em;
 }
-[data-testid="stButton"] button[kind="tertiary"]:hover:not(:disabled) {
-  background: var(--bg-yellow) !important;
-  transform: translateY(-1px);
+.vg-hero h1 span {
+  color: #aaa4ff;
+  background: linear-gradient(90deg, #b5b0ff, #8ed8ff);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
 }
-[data-testid="stButton"] button[kind="tertiary"]:disabled,
-[data-testid="stButton"] button[kind="tertiary"]:disabled * {
-  color: var(--text-muted-yellow) !important;
-  opacity: 1 !important;
+.vg-hero-copy {
+  position: relative;
+  z-index: 1;
+  max-width: 665px;
+  margin: 1.35rem 0 0;
+  color: #cbd5e1;
+  font-size: clamp(0.98rem, 1.8vw, 1.12rem);
+  line-height: 1.7;
 }
-[data-testid="stButton"] button[kind="tertiary"]:disabled {
-  background: var(--bg-cream) !important;
-  border-color: var(--text-muted-yellow) !important;
+.vg-chips {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.62rem;
+  margin-top: 1.55rem;
 }
-
-/* ---- disabled "coming soon" buttons ------------------------------------ */
-[data-testid="stButton"] button[kind="secondary"]:disabled,
-[data-testid="stButton"] button[kind="secondary"]:disabled * {
-  color: var(--text-muted-yellow) !important;
-}
-[data-testid="stButton"] button[kind="secondary"]:disabled {
-  background: var(--bg-yellow-soft) !important;
-  border: 1.5px dashed var(--text-muted-yellow) !important;
-  border-radius: 999px !important;
-  opacity: 1 !important;
-  font-weight: 600 !important;
-}
-
-/* ---- language dropdown (st.selectbox), top-right ----------------------- */
-[data-testid="stSelectbox"] label, [data-testid="stSelectbox"] label * {
-  color: var(--black) !important;
-}
-[data-testid="stSelectbox"] [data-baseweb="select"],
-[data-testid="stSelectbox"] [data-baseweb="select"] * {
-  color: var(--black) !important;
-}
-[data-testid="stSelectbox"] [data-baseweb="select"] > div {
-  background: var(--white) !important;
-  border: 1.5px solid var(--black) !important;
-  border-radius: 999px !important;
-}
-/* the open dropdown menu is portaled to <body>, styled separately below */
-ul[data-testid="stSelectboxVirtualDropdown"],
-ul[data-testid="stSelectboxVirtualDropdown"] * {
-  color: var(--black) !important;
-  background: var(--white) !important;
-}
-li[data-testid="stSelectboxVirtualDropdown"]:hover,
-ul[data-testid="stSelectboxVirtualDropdown"] li:hover {
-  background: var(--bg-yellow-soft) !important;
-}
-
-/* ---- file uploader ------------------------------------------------------
-   Note: the dropzone is a <section>, not a <div> -- an earlier version of
-   this rule was scoped to `div[data-testid=...]` and silently never matched
-   anything. Bare `[data-testid=...]` (no tag prefix) is used throughout this
-   file now specifically to avoid repeating that mistake. */
-[data-testid="stFileUploaderDropzone"] {
-  background: var(--white) !important;
-  border: 2px dashed var(--black) !important;
-  border-radius: 18px !important;
-}
-[data-testid="stFileUploaderDropzone"] button[kind="secondary"] {
-  background: var(--bg-yellow) !important;
-  border: none !important;
-}
-[data-testid="stFileUploaderDropzone"] button[kind="secondary"],
-[data-testid="stFileUploaderDropzone"] button[kind="secondary"] * {
-  color: var(--black) !important;
-}
-
-/* ---- alert cards --------------------------------------------------------
-   Own static HTML (authored directly, not Streamlit-wrapped) but still
-   forced with !important + descendant selector -- cheap insurance against
-   any future global rule (including this file's own) reaching in. */
-.alert-card {
-  border-radius: 16px;
-  padding: 1.1rem 1.4rem;
-  margin: 0.6rem 0 1rem 0;
-  border: 1.5px solid transparent;
-}
-.alert-card h4 { margin: 0 0 0.35rem 0; font-size: 1.15rem; }
-.alert-card p { margin: 0.15rem 0; }
-.alert-card .meta { font-size: 0.92rem; }
-.alert-card.success, .alert-card.success * {
-  color: var(--success-text) !important;
-}
-.alert-card.success { background: var(--success-bg); border-color: var(--success-border); }
-.alert-card.amber, .alert-card.amber * {
-  color: var(--amber-text) !important;
-}
-.alert-card.amber { background: var(--amber-bg); border-color: var(--amber-border); }
-
-/* ---- generic content card (PDF report, section wrappers) --------------- */
-.content-card, .content-card * { color: var(--black) !important; }
-.content-card {
-  background: var(--white);
-  border: 1.5px solid var(--bg-yellow);
-  border-radius: 18px;
-  padding: 1.2rem 1.4rem;
-  margin: 0.8rem 0;
-}
-.coming-soon-badge {
-  display: inline-block;
-  background: var(--bg-yellow);
-  color: var(--black) !important;
-  font-size: 0.75rem;
-  font-weight: 700;
-  padding: 0.15em 0.7em;
+.vg-chip {
+  padding: 0.48rem 0.78rem;
+  color: #e6eafd;
+  font-size: 0.77rem;
+  font-weight: 620;
+  border: 1px solid rgba(255,255,255,0.13);
   border-radius: 999px;
-  margin-left: 0.5em;
-  vertical-align: middle;
+  background: rgba(255,255,255,0.055);
+  backdrop-filter: blur(8px);
 }
 
-/* ---- header row: back/next arrows + language dropdown ------------------ */
-.nav-spacer { height: 0.2rem; }
+/* Section and workspace cards */
+.vg-section-kicker {
+  margin-bottom: 0.35rem;
+  color: var(--vg-brand-dark);
+  font-size: 0.72rem;
+  font-weight: 780;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.vg-section-title {
+  margin: 0 0 0.35rem;
+  font-size: clamp(1.45rem, 2.5vw, 2rem);
+  font-weight: 735;
+}
+.vg-section-copy { margin: 0 0 1.1rem; color: var(--vg-muted); line-height: 1.62; }
+
+[data-testid="stVerticalBlockBorderWrapper"] {
+  background: rgba(255,255,255,0.94);
+  border: 1px solid var(--vg-line) !important;
+  border-radius: 22px !important;
+  box-shadow: 0 14px 40px rgba(16,24,40,0.055);
+}
+[data-testid="stVerticalBlockBorderWrapper"] > div { padding: 0.35rem; }
+
+[data-testid="stFileUploader"] section {
+  min-height: 180px;
+  padding: 1.5rem 1rem;
+  border: 1.5px dashed #b9b5f7 !important;
+  border-radius: 18px !important;
+  background: linear-gradient(145deg, #fbfbff, #f6f5ff) !important;
+  transition: border-color 160ms ease, transform 160ms ease, box-shadow 160ms ease;
+}
+[data-testid="stFileUploader"] section:hover {
+  border-color: var(--vg-brand) !important;
+  box-shadow: 0 10px 28px rgba(102,92,246,0.10);
+  transform: translateY(-1px);
+}
+[data-testid="stFileUploader"] button {
+  border: 1px solid #d3d0ff !important;
+  border-radius: 10px !important;
+  color: var(--vg-brand-dark) !important;
+  background: white !important;
+  font-weight: 700 !important;
+}
+[data-testid="stFileUploaderDropzoneInstructions"] * { color: var(--vg-muted) !important; }
+
+.vg-file-meta {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 1rem;
+  align-items: center;
+  margin: 0.75rem 0 0.9rem;
+  padding: 0.85rem 1rem;
+  border: 1px solid var(--vg-line);
+  border-radius: 14px;
+  background: #fafbfc;
+}
+.vg-file-name {
+  overflow: hidden;
+  color: var(--vg-ink);
+  font-size: 0.88rem;
+  font-weight: 680;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.vg-file-size { color: var(--vg-muted); font-size: 0.8rem; font-weight: 600; }
+
+[data-testid="stAudio"] { margin-top: 0.5rem; }
+[data-testid="stAudio"] audio { width: 100%; }
+
+[data-testid="stButton"] button[kind="primary"] {
+  min-height: 51px;
+  border: 0 !important;
+  border-radius: 13px !important;
+  color: white !important;
+  background: linear-gradient(135deg, #6d63f7, #5147d9) !important;
+  box-shadow: 0 9px 22px rgba(102,92,246,0.24);
+  font-size: 0.96rem !important;
+  font-weight: 730 !important;
+  transition: transform 150ms ease, box-shadow 150ms ease, filter 150ms ease;
+}
+[data-testid="stButton"] button[kind="primary"] * { color: white !important; }
+[data-testid="stButton"] button[kind="primary"]:hover:not(:disabled) {
+  filter: brightness(1.04);
+  transform: translateY(-1px);
+  box-shadow: 0 13px 28px rgba(102,92,246,0.30);
+}
+[data-testid="stButton"] button:disabled { box-shadow: none !important; opacity: 0.48; }
+
+.vg-process-card {
+  height: 100%;
+  padding: 1.45rem;
+  border: 1px solid var(--vg-line);
+  border-radius: 22px;
+  background: rgba(255,255,255,0.9);
+  box-shadow: 0 14px 40px rgba(16,24,40,0.045);
+}
+.vg-process-card h3 { margin: 0 0 0.35rem; font-size: 1.05rem; letter-spacing: -0.02em; }
+.vg-process-intro { margin: 0 0 1.25rem; color: var(--vg-muted); font-size: 0.86rem; line-height: 1.55; }
+.vg-step {
+  display: grid;
+  grid-template-columns: 34px 1fr;
+  gap: 0.8rem;
+  position: relative;
+  padding-bottom: 1.08rem;
+}
+.vg-step:not(:last-child)::after {
+  content: "";
+  position: absolute;
+  left: 16px;
+  top: 34px;
+  bottom: 2px;
+  width: 1px;
+  background: #e6e7f2;
+}
+.vg-step-index {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border: 1px solid #d8d6ff;
+  border-radius: 11px;
+  color: var(--vg-brand-dark);
+  background: var(--vg-brand-soft);
+  font-size: 0.76rem;
+  font-weight: 780;
+}
+.vg-step strong { display: block; padding-top: 0.05rem; font-size: 0.88rem; }
+.vg-step p { margin: 0.2rem 0 0; color: var(--vg-muted); font-size: 0.79rem; line-height: 1.48; }
+.vg-privacy-strip {
+  margin-top: 0.35rem;
+  padding: 0.85rem 0.9rem;
+  border-radius: 13px;
+  color: #344054;
+  background: #f8f9fc;
+  font-size: 0.77rem;
+  line-height: 1.5;
+}
+
+/* Result */
+.vg-result-shell {
+  --result-accent: var(--vg-warning);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 1.5rem;
+  align-items: center;
+  margin-top: 1.2rem;
+  padding: clamp(1.35rem, 3vw, 2rem);
+  border: 1px solid var(--vg-line);
+  border-top: 4px solid var(--result-accent);
+  border-radius: 22px;
+  background: white;
+  box-shadow: var(--vg-shadow);
+}
+.vg-result-shell.real { --result-accent: var(--vg-success); }
+.vg-result-shell.fake { --result-accent: var(--vg-danger); }
+.vg-result-shell.uncertain { --result-accent: var(--vg-warning); }
+.vg-result-label {
+  color: var(--result-accent);
+  font-size: 0.7rem;
+  font-weight: 790;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.vg-result-shell h2 { margin: 0.4rem 0 0.5rem; font-size: clamp(1.7rem, 3.3vw, 2.5rem); }
+.vg-result-shell p { max-width: 650px; margin: 0; color: var(--vg-muted); line-height: 1.6; }
+.vg-score-ring {
+  display: grid;
+  place-items: center;
+  width: 132px;
+  height: 132px;
+  padding: 10px;
+  border-radius: 50%;
+  background: conic-gradient(var(--result-accent) calc(var(--score) * 1%), #eef0f5 0);
+}
+.vg-score-ring-inner {
+  display: grid;
+  place-content: center;
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  text-align: center;
+  background: white;
+  box-shadow: inset 0 0 0 1px #f0f1f4;
+}
+.vg-score-ring strong { color: var(--vg-ink); font-size: 1.45rem; line-height: 1; }
+.vg-score-ring span { margin-top: 0.32rem; color: var(--vg-muted); font-size: 0.64rem; font-weight: 700; text-transform: uppercase; }
+.vg-score-note { margin: 0.8rem 0 0 !important; color: var(--vg-muted); font-size: 0.78rem; }
+
+.vg-scale-card {
+  margin: 0.85rem 0 1rem;
+  padding: 1rem 1.15rem;
+  border: 1px solid var(--vg-line);
+  border-radius: 16px;
+  background: white;
+}
+.vg-scale-track {
+  position: relative;
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #8ee0bd 0%, #e9ecf2 50%, #ffaaa4 100%);
+}
+.vg-scale-marker {
+  position: absolute;
+  top: 50%;
+  left: calc(var(--score) * 1%);
+  width: 16px;
+  height: 16px;
+  border: 3px solid white;
+  border-radius: 50%;
+  background: var(--vg-navy);
+  box-shadow: 0 2px 7px rgba(16,24,40,0.28);
+  transform: translate(-50%, -50%);
+}
+.vg-scale-labels { display: flex; justify-content: space-between; margin-top: 0.58rem; color: var(--vg-muted); font-size: 0.72rem; font-weight: 600; }
+
+.alert-card {
+  margin: 0.75rem 0;
+  padding: 1.05rem 1.15rem;
+  border: 1px solid #fedf89;
+  border-radius: 16px;
+  color: #7a2e0e;
+  background: var(--vg-warning-soft);
+}
+.alert-card.success { border-color: #abefc6; color: #05603a; background: var(--vg-success-soft); }
+.alert-card.danger { border-color: #fecdca; color: #912018; background: var(--vg-danger-soft); }
+.alert-card h4 { margin: 0 0 0.3rem; color: inherit; font-size: 0.94rem; letter-spacing: -0.01em; }
+.alert-card p { margin: 0; color: inherit; font-size: 0.84rem; line-height: 1.55; }
+.alert-card .meta { margin-top: 0.38rem; font-weight: 650; }
+
+.vg-info-card {
+  height: 100%;
+  padding: 1.1rem 1.15rem;
+  border: 1px solid var(--vg-line);
+  border-radius: 16px;
+  background: white;
+}
+.vg-info-card .vg-info-icon {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  margin-bottom: 0.8rem;
+  border-radius: 10px;
+  color: var(--vg-brand-dark);
+  background: var(--vg-brand-soft);
+  font-size: 0.92rem;
+}
+.vg-info-card h4 { margin: 0 0 0.35rem; font-size: 0.9rem; }
+.vg-info-card p { margin: 0; color: var(--vg-muted); font-size: 0.78rem; line-height: 1.5; }
+
+[data-testid="stDownloadButton"] button {
+  min-height: 48px;
+  border: 1px solid #d3d0ff !important;
+  border-radius: 12px !important;
+  color: var(--vg-brand-dark) !important;
+  background: #f8f7ff !important;
+  font-weight: 720 !important;
+}
+[data-testid="stDownloadButton"] button:hover {
+  border-color: var(--vg-brand) !important;
+  background: var(--vg-brand-soft) !important;
+}
+[data-testid="stExpander"] {
+  border: 1px solid var(--vg-line) !important;
+  border-radius: 14px !important;
+  background: rgba(255,255,255,0.8) !important;
+}
+[data-testid="stExpander"] summary, [data-testid="stExpander"] summary * { color: var(--vg-ink) !important; }
+
+.vg-footer {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-top: 2.3rem;
+  padding-top: 1.2rem;
+  border-top: 1px solid var(--vg-line);
+  color: var(--vg-muted);
+  font-size: 0.74rem;
+  line-height: 1.5;
+}
+.vg-footer strong { color: #344054; }
+
+@media (max-width: 700px) {
+  [data-testid="stAppViewContainer"] > .main .block-container { padding: 0.8rem 1rem 2rem; }
+  .vg-hero { padding: 2rem 1.35rem; border-radius: 22px; }
+  .vg-hero h1 { font-size: 2.25rem; }
+  .vg-result-shell { grid-template-columns: 1fr; }
+  .vg-score-ring { width: 116px; height: 116px; }
+  .vg-footer { flex-direction: column; }
+}
 """
 
 
 def alert_card(kind: str, title: str, body_html: str, meta_html: str = "") -> str:
-    """
-    Static styled box for a verdict/error result. Plain HTML via st.markdown --
-    no animation needed, so no reason to pay for an iframe here.
-    """
-    css_kind = "success" if kind == "success" else "amber"
+    """Return a semantic alert card. Callers must escape user-controlled text."""
+    css_kind = kind if kind in {"success", "danger"} else "warning"
     meta = f'<p class="meta">{meta_html}</p>' if meta_html else ""
     return (
         f'<div class="alert-card {css_kind}">'
         f"<h4>{title}</h4>{body_html}{meta}"
-        f"</div>"
+        "</div>"
     )
-
-
-# ---------------------------------------------------------------------------
-# components.v1.html snippets — each is a complete standalone HTML document.
-# ---------------------------------------------------------------------------
-
-def landing_illustration_html() -> str:
-    """
-    Flat line-art seated figure reading, looping ~8s dramatization: calm
-    reading -> phone rings -> panic reaction (shake, alarmed face, motion
-    lines, book slips) -> worried hold -> cut back to calm.
-
-    Choreography note: every element shares one 8s master timeline
-    (`--cycle`) via matching `animation-duration`, using percentage
-    keyframe offsets, so everything stays in sync without JS. A few elements
-    additionally run their OWN fast, independent looping animation (idle
-    bob, wave pulse, running legs) layered via a second comma-separated
-    `animation` on the same element -- a fast micro-loop for continuous life,
-    gated visible/invisible by the slow master-timeline animation.
-    """
-    return f"""<!doctype html><html><head><meta charset="utf-8"><style>
-{CSS_VARS_BLOCK}
-html,body {{ margin:0; padding:0; background:transparent; overflow:hidden; }}
-.wrap {{ display:flex; justify-content:center; align-items:center; height:100%; }}
-svg {{ width:100%; max-width:320px; height:auto; display:block; }}
-
-/* ---- idle bob (continuous, independent of the story timeline) -------- */
-@keyframes idle-bob {{
-  0%, 100% {{ transform: translateY(0); }}
-  50%      {{ transform: translateY(-3px); }}
-}}
-#person {{ animation: idle-bob 2.2s ease-in-out infinite, story-shake 8s ease-in-out infinite; transform-origin: 150px 260px; }}
-
-/* ---- master story timeline: person shake burst during panic ---------- */
-@keyframes story-shake {{
-  0%, 49% {{ transform: translateX(0) rotate(0); }}
-  50%     {{ transform: translateX(-4px) rotate(-1.2deg); }}
-  52%     {{ transform: translateX(4px) rotate(1.2deg); }}
-  54%     {{ transform: translateX(-3px) rotate(-1deg); }}
-  56%, 100% {{ transform: translateX(0) rotate(0); }}
-}}
-
-/* ---- face swap: calm <-> panic ---------------------------------------- */
-@keyframes face-calm {{
-  0%, 49.5% {{ opacity: 1; }}
-  50%, 99.5% {{ opacity: 0; }}
-  100% {{ opacity: 1; }}
-}}
-@keyframes face-panic {{
-  0%, 49.5% {{ opacity: 0; }}
-  50%, 99.5% {{ opacity: 1; }}
-  100% {{ opacity: 0; }}
-}}
-#face-calm  {{ animation: face-calm 8s linear infinite; }}
-#face-panic {{ animation: face-panic 8s linear infinite; }}
-
-/* ---- book: slips down/rotates during panic, back in place after loop -- */
-@keyframes book-drop {{
-  0%, 49%   {{ transform: translate(0,0) rotate(0deg); }}
-  58%, 90%  {{ transform: translate(-6px, 14px) rotate(-14deg); }}
-  100%      {{ transform: translate(0,0) rotate(0deg); }}
-}}
-#book {{ animation: book-drop 8s ease-in-out infinite; transform-origin: 150px 196px; }}
-
-/* ---- phone: rings (shake) only in its window -------------------------- */
-@keyframes phone-window {{
-  0%, 36%   {{ opacity: 0; }}
-  37%, 50%  {{ opacity: 1; }}
-  51%, 100% {{ opacity: 0; }}
-}}
-@keyframes phone-shake {{
-  0%, 100% {{ transform: rotate(0deg); }}
-  25%      {{ transform: rotate(-8deg); }}
-  75%      {{ transform: rotate(8deg); }}
-}}
-#phone-waves {{ animation: phone-window 8s linear infinite; }}
-#phone-body  {{ animation: phone-shake 0.25s ease-in-out infinite; transform-origin: 247px 139px; }}
-
-@keyframes wave-pulse {{
-  0%   {{ opacity: 0.9; transform: scale(0.6); }}
-  100% {{ opacity: 0;   transform: scale(1.6); }}
-}}
-.wave {{ animation: wave-pulse 0.9s ease-out infinite; transform-origin: 247px 139px; }}
-.wave:nth-child(2) {{ animation-delay: 0.3s; }}
-.wave:nth-child(3) {{ animation-delay: 0.6s; }}
-
-/* ---- motion lines flash during the panic burst ------------------------ */
-@keyframes lines-window {{
-  0%, 49%   {{ opacity: 0; }}
-  51%, 63%  {{ opacity: 1; }}
-  70%, 100% {{ opacity: 0; }}
-}}
-#motion-lines {{ animation: lines-window 8s ease-out infinite; }}
-</style></head>
-<body><div class="wrap">
-<svg viewBox="0 0 320 320" fill="none" xmlns="http://www.w3.org/2000/svg">
-
-  <g id="person" stroke="var(--black)" stroke-width="4" stroke-linecap="round" stroke-linejoin="round">
-    <!-- crossed-leg seated base -->
-    <path d="M92 268 Q150 300 208 268 Q190 250 150 250 Q110 250 92 268 Z" fill="var(--bg-yellow-soft)"/>
-    <!-- torso -->
-    <rect x="104" y="128" width="92" height="110" rx="28" fill="var(--white)"/>
-    <!-- arms toward book -->
-    <path d="M108 168 Q92 190 118 205" fill="none"/>
-    <path d="M192 168 Q208 190 182 205" fill="none"/>
-    <!-- head -->
-    <circle cx="150" cy="90" r="30" fill="var(--bg-yellow)"/>
-
-    <!-- calm face: looking down at the book -->
-    <g id="face-calm">
-      <path d="M134 90 Q140 96 146 90" fill="none" stroke-width="3.2"/>
-      <path d="M154 90 Q160 96 166 90" fill="none" stroke-width="3.2"/>
-      <path d="M140 106 Q150 110 160 106" fill="none" stroke-width="3"/>
-    </g>
-
-    <!-- panic face: wide eyes, raised brows, open mouth -->
-    <g id="face-panic">
-      <line x1="130" y1="76" x2="142" y2="80" stroke-width="3"/>
-      <line x1="170" y1="76" x2="158" y2="80" stroke-width="3"/>
-      <circle cx="139" cy="90" r="5.5" fill="var(--black)" stroke="none"/>
-      <circle cx="161" cy="90" r="5.5" fill="var(--black)" stroke="none"/>
-      <ellipse cx="150" cy="108" rx="7" ry="9" fill="var(--white)" stroke-width="3"/>
-    </g>
-  </g>
-
-  <!-- book (own transform group, animated independently of #person) -->
-  <g id="book" stroke="var(--black)" stroke-width="3.5" stroke-linejoin="round">
-    <rect x="118" y="150" width="64" height="46" rx="5" fill="var(--white)"/>
-    <line x1="150" y1="150" x2="150" y2="196"/>
-  </g>
-
-  <!-- motion lines near the head, flash during panic -->
-  <g id="motion-lines" stroke="var(--black)" stroke-width="3" stroke-linecap="round">
-    <line x1="104" y1="60" x2="90" y2="48"/>
-    <line x1="98" y1="76" x2="80" y2="72"/>
-    <line x1="196" y1="60" x2="210" y2="48"/>
-    <line x1="202" y1="76" x2="220" y2="72"/>
-  </g>
-
-  <!-- phone -->
-  <g id="phone">
-    <g id="phone-waves" stroke="var(--black)" stroke-width="2.5" fill="none">
-      <circle class="wave" cx="247" cy="139" r="22"/>
-      <circle class="wave" cx="247" cy="139" r="22"/>
-      <circle class="wave" cx="247" cy="139" r="22"/>
-    </g>
-    <rect id="phone-body" x="230" y="110" width="34" height="58" rx="8"
-          fill="var(--black)" stroke="var(--black)" stroke-width="2"/>
-  </g>
-</svg>
-</div></body></html>"""
-
-
-def hamster_loader_html(label: str = "Analyzing voice…") -> str:
-    """Palette-themed hamster-wheel loader, self-contained (no Python round trip)."""
-    return f"""<!doctype html><html><head><meta charset="utf-8"><style>
-{CSS_VARS_BLOCK}
-html,body {{ margin:0; padding:0; background:transparent; }}
-.wrap {{ display:flex; flex-direction:column; align-items:center; justify-content:center;
-         height:100%; font-family: -apple-system, "Segoe UI", Roboto, sans-serif; }}
-svg {{ width:130px; height:130px; }}
-
-@keyframes spin {{ from {{ transform: rotate(0deg); }} to {{ transform: rotate(360deg); }} }}
-#wheel {{ animation: spin 1.1s linear infinite; transform-origin: 100px 100px; }}
-
-@keyframes bob {{ 0%,100% {{ transform: translateY(0); }} 50% {{ transform: translateY(-2px); }} }}
-#hamster {{ animation: bob 0.28s ease-in-out infinite; }}
-
-@keyframes leg-a {{ 0%,100% {{ transform: translateY(0); }} 50% {{ transform: translateY(3px); }} }}
-@keyframes leg-b {{ 0%,100% {{ transform: translateY(3px); }} 50% {{ transform: translateY(0); }} }}
-.leg-front {{ animation: leg-a 0.28s ease-in-out infinite; }}
-.leg-back  {{ animation: leg-b 0.28s ease-in-out infinite; }}
-
-@keyframes pulse-text {{ 0%,100% {{ opacity: 0.6; }} 50% {{ opacity: 1; }} }}
-.label {{ margin-top: 0.6rem; font-weight: 600; color: var(--black); animation: pulse-text 1.4s ease-in-out infinite; }}
-</style></head>
-<body><div class="wrap">
-<svg viewBox="0 0 200 200">
-  <g id="wheel" fill="none" stroke="var(--bg-yellow)" stroke-width="8">
-    <circle cx="100" cy="100" r="70"/>
-    <line x1="100" y1="30" x2="100" y2="170"/>
-    <line x1="30" y1="100" x2="170" y2="100"/>
-    <line x1="50" y1="50" x2="150" y2="150"/>
-    <line x1="150" y1="50" x2="50" y2="150"/>
-  </g>
-  <g id="hamster" stroke="var(--black)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
-    <line class="leg-front" x1="88" y1="150" x2="86" y2="162" stroke-width="4"/>
-    <line class="leg-back"  x1="112" y1="150" x2="114" y2="162" stroke-width="4"/>
-    <ellipse cx="100" cy="140" rx="22" ry="14" fill="var(--black)"/>
-    <circle cx="122" cy="132" r="10" fill="var(--black)"/>
-    <path d="M114 122 l-4 -8 l8 3 Z" fill="var(--black)"/>
-    <path d="M80 142 q-10 -2 -14 4" fill="none" stroke-width="2.5"/>
-  </g>
-</svg>
-<div class="label">{label}</div>
-</div></body></html>"""
-
-
-def whatsapp_icon_svg(size: int = 56) -> str:
-    """
-    Generic chat-bubble + phone glyph, flat line-art, consistent with the
-    illustration style used elsewhere. Deliberately not a literal WhatsApp
-    logo -- a shape that reads as "messaging", nothing brand-specific.
-    """
-    return f"""<svg width="{size}" height="{size}" viewBox="0 0 64 64" fill="none"
-      xmlns="http://www.w3.org/2000/svg" style="flex-shrink:0;">
-  <circle cx="32" cy="32" r="30" fill="var(--bg-yellow-soft)"/>
-  <path d="M20 22h20a4 4 0 0 1 4 4v10a4 4 0 0 1-4 4H28l-8 6v-6a4 4 0 0 1-4-4V26a4 4 0 0 1 4-4Z"
-        fill="var(--white)" stroke="var(--black)" stroke-width="3" stroke-linejoin="round"/>
-  <circle cx="26" cy="30" r="2" fill="var(--black)"/>
-  <circle cx="32" cy="30" r="2" fill="var(--black)"/>
-  <circle cx="38" cy="30" r="2" fill="var(--black)"/>
-</svg>"""
-
-
-def scroll_reveal_component(
-    title: str,
-    body_html: str,
-    badge_text: str = "Coming soon",
-    icon_svg: str = "",
-) -> str:
-    """
-    A card that fades/slides into place once the surrounding iframe scrolls
-    into the OUTER page's viewport (not just its own).
-
-    Uses `window.frameElement` from inside the iframe to read the iframe's own
-    position in the parent document -- this only works because
-    components.v1.html renders a same-origin `srcdoc` iframe. If that access
-    is ever blocked (a stricter embedding context), the card intentionally
-    starts partially visible (opacity 0.55, not 0) rather than fully hidden,
-    so it degrades to "visible but not animated" instead of "invisible."
-    """
-    icon_html = f'<div class="icon">{icon_svg}</div>' if icon_svg else ""
-    return f"""<!doctype html><html><head><meta charset="utf-8"><style>
-{CSS_VARS_BLOCK}
-html,body {{ margin:0; padding:0; background:transparent;
-             font-family: -apple-system, "Segoe UI", Roboto, sans-serif; }}
-.card {{
-  background: var(--white);
-  border: 1.5px solid var(--bg-yellow);
-  border-radius: 18px;
-  padding: 1.2rem 1.4rem;
-  opacity: 0.55;
-  transform: translateY(14px);
-  transition: opacity 0.6s ease, transform 0.6s ease;
-  box-sizing: border-box;
-  display: flex;
-  align-items: flex-start;
-  gap: 0.9rem;
-}}
-.card.visible {{ opacity: 1; transform: translateY(0); }}
-.card .icon {{ flex-shrink: 0; }}
-.card .text {{ flex: 1; min-width: 0; }}
-.card h4 {{ margin: 0 0 0.4rem 0; color: var(--black); font-size: 1.1rem; }}
-.card p {{ margin: 0.2rem 0; color: var(--black); }}
-.badge {{
-  display:inline-block; background: var(--bg-yellow); color: var(--black);
-  font-size: 0.75rem; font-weight: 700; padding: 0.15em 0.7em;
-  border-radius: 999px; margin-left: 0.5em; vertical-align: middle;
-}}
-</style></head>
-<body>
-<div class="card" id="card">
-  {icon_html}
-  <div class="text">
-    <h4>{title}<span class="badge">{badge_text}</span></h4>
-    {body_html}
-  </div>
-</div>
-<script>
-  var card = document.getElementById('card');
-  function checkVisible() {{
-    try {{
-      var rect = window.frameElement.getBoundingClientRect();
-      var vh = window.parent.innerHeight || document.documentElement.clientHeight;
-      if (rect.top < vh * 0.9 && rect.bottom > 0) {{
-        card.classList.add('visible');
-      }}
-    }} catch (e) {{
-      // Cross-origin or blocked access -- fall back to the partially-visible
-      // static state defined in CSS above rather than staying invisible.
-      card.classList.add('visible');
-    }}
-  }}
-  checkVisible();
-  try {{ window.parent.addEventListener('scroll', checkVisible, {{ passive: true }}); }}
-  catch (e) {{ /* fallback already applied above */ }}
-  window.addEventListener('scroll', checkVisible, {{ passive: true }});
-  setInterval(checkVisible, 500);
-</script>
-</body></html>"""
-
-
-def live_call_companion_html() -> str:
-    """
-    Flat line-art figure waiting mid-call: idle stand -> checks a wrist watch
-    -> shoulders drop in a sigh, with a small breath-wisp cue -> settles ->
-    loops. Same synced-master-timeline technique as landing_illustration_html
-    (all elements share one animation-duration with percentage keyframe
-    offsets), just a shorter ~5s cycle since this is one continuous mood
-    rather than a multi-beat story.
-    """
-    return f"""<!doctype html><html><head><meta charset="utf-8"><style>
-{CSS_VARS_BLOCK}
-html,body {{ margin:0; padding:0; background:transparent; overflow:hidden; }}
-.wrap {{ display:flex; justify-content:center; align-items:center; height:100%; }}
-svg {{ width:100%; max-width:220px; height:auto; display:block; }}
-
-@keyframes idle-bob {{
-  0%, 100% {{ transform: translateY(0); }}
-  50%      {{ transform: translateY(-2px); }}
-}}
-#figure {{ animation: idle-bob 2.4s ease-in-out infinite; transform-origin: 110px 230px; }}
-
-/* master timeline (shared by arm-raise / shoulder-slump / sigh-window below):
-   0-40% idle wait, 40-58% arm raises to check watch, 58-72% shoulders drop /
-   sigh, 72-100% settle back to idle */
-@keyframes arm-raise {{
-  0%, 38%   {{ transform: rotate(0deg); }}
-  46%, 56%  {{ transform: rotate(-58deg); }}
-  64%, 100% {{ transform: rotate(0deg); }}
-}}
-#arm-watch {{ animation: arm-raise 5s ease-in-out infinite; transform-origin: 130px 168px; }}
-
-@keyframes shoulder-slump {{
-  0%, 56%   {{ transform: translateY(0); }}
-  66%, 88%  {{ transform: translateY(4px); }}
-  100%      {{ transform: translateY(0); }}
-}}
-#shoulders {{ animation: shoulder-slump 5s ease-in-out infinite; }}
-
-@keyframes sigh-window {{
-  0%, 60%   {{ opacity: 0; transform: translateY(0); }}
-  66%       {{ opacity: 0.9; transform: translateY(-2px); }}
-  85%       {{ opacity: 0; transform: translateY(-14px); }}
-  100%      {{ opacity: 0; transform: translateY(0); }}
-}}
-#sigh {{ animation: sigh-window 5s ease-out infinite; }}
-</style></head>
-<body><div class="wrap">
-<svg viewBox="0 0 220 260" fill="none" xmlns="http://www.w3.org/2000/svg">
-
-  <g id="figure" stroke="var(--black)" stroke-width="4" stroke-linecap="round" stroke-linejoin="round">
-    <!-- legs / base -->
-    <path d="M92 230 L88 200 M128 230 L132 200" fill="none"/>
-    <!-- torso -->
-    <g id="shoulders">
-      <rect x="86" y="130" width="48" height="80" rx="20" fill="var(--bg-yellow-soft)"/>
-    </g>
-    <!-- static arm, resting -->
-    <path d="M92 140 Q78 165 84 190" fill="none"/>
-    <!-- arm that raises to check the watch -->
-    <g id="arm-watch">
-      <path d="M128 140 Q142 155 132 168" fill="none"/>
-      <circle cx="132" cy="168" r="6" fill="var(--white)" stroke="var(--black)" stroke-width="2.5"/>
-      <line x1="132" y1="164" x2="132" y2="168" stroke-width="1.8"/>
-      <line x1="132" y1="168" x2="135" y2="168" stroke-width="1.8"/>
-    </g>
-    <!-- head -->
-    <circle cx="110" cy="104" r="26" fill="var(--bg-yellow)"/>
-    <!-- calm-tired face -->
-    <path d="M98 104 Q103 108 108 104" fill="none" stroke-width="3"/>
-    <path d="M112 104 Q117 108 122 104" fill="none" stroke-width="3"/>
-    <path d="M100 118 Q110 114 120 118" fill="none" stroke-width="3"/>
-  </g>
-
-  <!-- breath / sigh wisp -->
-  <g id="sigh" stroke="var(--black)" stroke-width="2.5" fill="none" stroke-linecap="round">
-    <path d="M132 96 Q140 90 136 82 Q132 76 138 70"/>
-  </g>
-</svg>
-</div></body></html>"""

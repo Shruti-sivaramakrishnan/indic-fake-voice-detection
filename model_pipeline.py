@@ -50,18 +50,31 @@ no ONNX quantization this cycle.
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import os
 import random
+import re
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset, Sampler
+
+from voice_guard_core import (
+    AudioValidationError,  # noqa: F401 - public compatibility re-export
+    DEFAULT_AUDIO_POLICY,
+    DEFAULT_DECISION_POLICY,
+    normalize_language_hint,
+    stable_sigmoid,
+    validate_decoded_audio,
+    validate_encoded_audio_size,
+    verdict_from_probability,
+)
 
 
 # ============================================================================
@@ -112,6 +125,8 @@ class TrainConfig:
     hidden_dim: int = 256            # [verified]
     num_gat_layers: int = 2          # [verified]
     dropout: float = 0.3             # [verified] AASISTHead default used by the run
+    head_type: str = "gat"           # gat | attention_pool | mean_pool
+    separate_layer_norms: bool = False  # v2 ablation; False loads v1 checkpoints
     learning_rate: float = 1e-4      # [verified]
 
     # [verified] The run called optim.AdamW(head.parameters(), lr=1e-4) and passed
@@ -131,6 +146,14 @@ class TrainConfig:
     # [beyond verified] The proven run had NO gradient clipping. 0.0 disables it
     # and reproduces that exactly. Set > 0 only as a deliberate experiment.
     grad_clip: float = 0.0
+
+    # Validation-only experiment knobs for v2 robustness. These operate on
+    # frozen XLS-R features, so they add no cache cost. Keep them at zero for a
+    # clean baseline, then compare a declared augmentation run on validation.
+    feature_noise_std: float = 0.0
+    time_mask_probability: float = 0.0
+    time_mask_max_frames: int = 20
+    feature_channel_dropout_probability: float = 0.0
 
     seed: int = SEED
 
@@ -237,6 +260,7 @@ def build_label_lookup(
 
 def assert_split_integrity(
     splits: Optional[Dict[str, List[str]]] = None,
+    require_group_disjoint: bool = False,
 ) -> None:
     """
     Cheap in-process restatement of data_pipeline/leakage_audit.py, so a training
@@ -256,6 +280,62 @@ def assert_split_integrity(
 
     if len(train | val | test) != EXPECTED_TOTAL_CLIPS:
         raise ValueError("Unique clip ID count does not match the frozen split.")
+
+    if require_group_disjoint:
+        def family(clip_id: str) -> str:
+            return re.sub(r"[_-]?\d+$", "", clip_id.strip()).casefold()
+
+        group_sets = {
+            name: {family(clip_id) for clip_id in splits[name]}
+            for name in SPLIT_NAMES
+        }
+        overlaps = {
+            f"{left}-{right}": group_sets[left] & group_sets[right]
+            for index, left in enumerate(SPLIT_NAMES)
+            for right in SPLIT_NAMES[index + 1 :]
+        }
+        overlaps = {pair: values for pair, values in overlaps.items() if values}
+        if overlaps:
+            summary = ", ".join(
+                f"{pair}={len(values)}" for pair, values in overlaps.items()
+            )
+            raise ValueError(
+                "Split leakage: source-family proxy groups cross boundaries "
+                f"({summary}). The historical v1 split is inference/evaluation "
+                "only; build a group-disjoint v2 split before retraining."
+            )
+
+
+def assert_split_coverage(
+    splits: Dict[str, List[str]],
+    metadata: Dict[str, List[Tuple[str, str, int]]],
+) -> None:
+    """Require every language/label stratum in every reportable split."""
+    rows = [row for split_rows in metadata.values() for row in split_rows]
+    by_id = {clip_id: (language, int(label)) for clip_id, language, label in rows}
+    missing_ids = sorted(
+        clip_id
+        for clip_ids in splits.values()
+        for clip_id in clip_ids
+        if clip_id not in by_id
+    )
+    if missing_ids:
+        raise ValueError(
+            f"Split contains {len(missing_ids)} IDs absent from metadata: {missing_ids[:10]}"
+        )
+
+    expected_strata = set(by_id.values())
+    missing_by_split = {}
+    for split_name, clip_ids in splits.items():
+        present = {by_id[clip_id] for clip_id in clip_ids}
+        missing = expected_strata - present
+        if missing:
+            missing_by_split[split_name] = sorted(missing)
+    if missing_by_split:
+        raise ValueError(
+            "Split coverage failure: every language needs both real and fake "
+            f"examples in every split. Missing strata: {missing_by_split}"
+        )
 
 
 # ============================================================================
@@ -349,8 +429,7 @@ def ensure_target_sample_rate(
 # Loaded lazily. Importing this module must not download 1.2 GB of weights or
 # claim GPU memory as a side effect — that only happens on first actual use.
 
-_feature_extractor = None
-_frontend = None
+_FRONTEND_CACHE: Dict[Tuple[str, str], Tuple[Any, nn.Module]] = {}
 
 
 def load_frontend(
@@ -363,24 +442,24 @@ def load_frontend(
     Returns (feature_extractor, frozen_frontend). Verified to freeze to
     0 trainable parameters.
     """
-    global _feature_extractor, _frontend
-
-    if _feature_extractor is not None and _frontend is not None:
-        return _feature_extractor, _frontend
-
     from transformers import Wav2Vec2FeatureExtractor, Wav2Vec2Model
 
     device = device or DEVICE
 
-    _feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(model_name)
+    cache_key = (model_name, str(device))
+    if cache_key in _FRONTEND_CACHE:
+        return _FRONTEND_CACHE[cache_key]
+
+    feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(model_name)
     frontend = Wav2Vec2Model.from_pretrained(model_name)
 
     for param in frontend.parameters():
         param.requires_grad = False
     frontend.eval()
-    _frontend = frontend.to(device)
+    frontend = frontend.to(device)
+    _FRONTEND_CACHE[cache_key] = (feature_extractor, frontend)
 
-    return _feature_extractor, _frontend
+    return feature_extractor, frontend
 
 
 def count_trainable_params(module: nn.Module) -> int:
@@ -691,6 +770,15 @@ def read_manifest(
         return json.load(f)
 
 
+def fingerprint_clip_ids(clip_ids: Sequence[str]) -> str:
+    """Return a stable fingerprint for the exact set of clips in a split."""
+    digest = hashlib.sha256()
+    for clip_id in sorted(clip_ids):
+        digest.update(clip_id.encode("utf-8"))
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
 def write_manifest(
     split_name: str,
     shards: List[Dict[str, Any]],
@@ -700,6 +788,7 @@ def write_manifest(
     capped: Optional[int] = None,
     expected_clips: Optional[int] = None,
     failed_clip_ids: Optional[Sequence[str]] = None,
+    target_ids_sha256: Optional[str] = None,
 ) -> str:
     """
     Rewritten after every shard, so a crash leaves a manifest describing exactly
@@ -712,6 +801,9 @@ def write_manifest(
     `expected_clips` and `failed_clip_ids` make a shortfall auditable: a complete
     cache satisfies num_clips + num_failed == expected_clips, so a split that
     quietly under-delivers cannot look identical to one that did not.
+
+    `target_ids_sha256` binds the cache to one exact split. A cache without this
+    field is legacy and must not be reused for v2 training.
     """
     os.makedirs(cache_dir, exist_ok=True)
     path = manifest_path(split_name, cache_dir)
@@ -726,6 +818,7 @@ def write_manifest(
         "capped": capped,
         "num_clips": num_clips,
         "expected_clips": expected_clips,
+        "target_ids_sha256": target_ids_sha256,
         "num_failed": len(failed_clip_ids),
         "failed_clip_ids": failed_clip_ids,
         "accounted_for": (
@@ -805,6 +898,9 @@ def build_feature_caches_streaming(
     os.makedirs(cache_dir, exist_ok=True)
     device = device or DEVICE
     dtype_name = str(store_dtype).replace("torch.", "")
+    target_fingerprints = {
+        name: fingerprint_clip_ids(ids) for name, ids in targets.items()
+    }
 
     # --- resume bookkeeping ------------------------------------------------
     shards: Dict[str, List[Dict[str, Any]]] = {name: [] for name in targets}
@@ -814,6 +910,18 @@ def build_feature_caches_streaming(
         existing = read_manifest(name, cache_dir) if resume else None
         if not existing:
             continue
+        actual_fingerprint = existing.get("target_ids_sha256")
+        expected_fingerprint = target_fingerprints[name]
+        if actual_fingerprint != expected_fingerprint:
+            reason = (
+                "has no split fingerprint (legacy cache)"
+                if not actual_fingerprint
+                else "was built for a different set of clip IDs"
+            )
+            raise RuntimeError(
+                f"[{name}] existing feature cache {reason}. Refusing to mix "
+                "features across split protocols; use a fresh cache directory."
+            )
         if existing.get("store_dtype") != dtype_name:
             print(
                 f"[{name}] existing cache is {existing.get('store_dtype')} but "
@@ -911,6 +1019,7 @@ def build_feature_caches_streaming(
                     capped=max_clips_per_split,
                     expected_clips=total_wanted[name],
                     failed_clip_ids=[r["clip_id"] for r in failures[name]],
+                    target_ids_sha256=target_fingerprints[name],
                 )
             return
 
@@ -938,6 +1047,7 @@ def build_feature_caches_streaming(
             capped=max_clips_per_split,
             expected_clips=total_wanted[name],
             failed_clip_ids=[r["clip_id"] for r in failures[name]],
+            target_ids_sha256=target_fingerprints[name],
         )
 
         del buffers[name][:take]
@@ -1633,6 +1743,7 @@ def repair_feature_cache(
         capped=manifest.get("capped"),
         expected_clips=audit["expected"],
         failed_clip_ids=new_failed,
+        target_ids_sha256=manifest.get("target_ids_sha256"),
     )
 
     after = read_manifest(split_name, cache_dir) or {}
@@ -1899,6 +2010,7 @@ class AASISTHead(nn.Module):
         hidden_dim: int = 256,
         num_gat_layers: int = 2,
         dropout: float = 0.3,
+        separate_layer_norms: bool = False,
     ):
         super().__init__()
         self.input_proj = nn.Linear(input_dim, hidden_dim)
@@ -1906,7 +2018,14 @@ class AASISTHead(nn.Module):
             GraphAttentionLayer(hidden_dim, hidden_dim, dropout=dropout)
             for _ in range(num_gat_layers)
         ])
-        self.layer_norm = nn.LayerNorm(hidden_dim)
+        self.separate_layer_norms = separate_layer_norms
+        if separate_layer_norms:
+            self.layer_norms = nn.ModuleList(
+                nn.LayerNorm(hidden_dim) for _ in range(num_gat_layers)
+            )
+        else:
+            # Preserve the historical v1 state-dict key and exact behavior.
+            self.layer_norm = nn.LayerNorm(hidden_dim)
         self.dropout = nn.Dropout(dropout)
         self.pool_attn = nn.Linear(hidden_dim, 1)
         self.classifier = nn.Sequential(
@@ -1919,10 +2038,15 @@ class AASISTHead(nn.Module):
     def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         h = self.input_proj(x)
 
-        for gat in self.gat_layers:
+        for layer_index, gat in enumerate(self.gat_layers):
             residual = h
             h = gat(h, mask=mask)
-            h = self.layer_norm(h + residual)
+            norm = (
+                self.layer_norms[layer_index]
+                if self.separate_layer_norms
+                else self.layer_norm
+            )
+            h = norm(h + residual)
             h = self.dropout(h)
             if mask is not None:
                 h = h * mask.unsqueeze(-1)
@@ -1937,14 +2061,69 @@ class AASISTHead(nn.Module):
         return logit
 
 
-def build_model(config: Optional[TrainConfig] = None) -> AASISTHead:
+class PoolingBaselineHead(nn.Module):
+    """Low-complexity ablation for proving whether graph attention adds value."""
+
+    def __init__(
+        self,
+        input_dim: int = FRONTEND_DIM,
+        hidden_dim: int = 256,
+        dropout: float = 0.3,
+        pooling: str = "attention",
+    ):
+        super().__init__()
+        if pooling not in {"attention", "mean"}:
+            raise ValueError("pooling must be 'attention' or 'mean'.")
+        self.pooling = pooling
+        self.input_proj = nn.Linear(input_dim, hidden_dim)
+        self.layer_norm = nn.LayerNorm(hidden_dim)
+        self.dropout = nn.Dropout(dropout)
+        self.pool_attn = nn.Linear(hidden_dim, 1) if pooling == "attention" else None
+        self.classifier = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim // 2, 1),
+        )
+
+    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        h = self.dropout(self.layer_norm(self.input_proj(x)))
+        if mask is None:
+            mask = torch.ones(h.shape[:2], dtype=h.dtype, device=h.device)
+
+        if self.pooling == "attention":
+            scores = self.pool_attn(h).squeeze(-1)
+            scores = scores.masked_fill(mask == 0, float("-inf"))
+            weights = F.softmax(scores, dim=-1).unsqueeze(-1)
+            pooled = (h * weights).sum(dim=1)
+        else:
+            weights = mask.unsqueeze(-1)
+            pooled = (h * weights).sum(dim=1) / weights.sum(dim=1).clamp_min(1.0)
+        return self.classifier(pooled).squeeze(-1)
+
+
+def build_model(config: Optional[TrainConfig] = None) -> nn.Module:
     config = config or TrainConfig()
-    return AASISTHead(
-        input_dim=FRONTEND_DIM,
-        hidden_dim=config.hidden_dim,
-        num_gat_layers=config.num_gat_layers,
-        dropout=config.dropout,
-    ).to(DEVICE)
+    if config.head_type == "gat":
+        model: nn.Module = AASISTHead(
+            input_dim=FRONTEND_DIM,
+            hidden_dim=config.hidden_dim,
+            num_gat_layers=config.num_gat_layers,
+            dropout=config.dropout,
+            separate_layer_norms=config.separate_layer_norms,
+        )
+    elif config.head_type in {"attention_pool", "mean_pool"}:
+        model = PoolingBaselineHead(
+            input_dim=FRONTEND_DIM,
+            hidden_dim=config.hidden_dim,
+            dropout=config.dropout,
+            pooling="attention" if config.head_type == "attention_pool" else "mean",
+        )
+    else:
+        raise ValueError(
+            f"Unknown head_type={config.head_type!r}; choose gat, attention_pool, or mean_pool."
+        )
+    return model.to(DEVICE)
 
 
 # ============================================================================
@@ -2071,14 +2250,20 @@ class TemperatureScaler(nn.Module):
 
     def __init__(self):
         super().__init__()
-        self.temperature = nn.Parameter(torch.ones(1) * 1.5)
+        # Optimize log(T), not T directly, so the temperature can never cross
+        # zero and invert the classifier's score orientation.
+        self.log_temperature = nn.Parameter(torch.log(torch.ones(1) * 1.5))
+
+    @property
+    def temperature(self) -> torch.Tensor:
+        return self.log_temperature.exp().clamp(1e-3, 100.0)
 
     def forward(self, logits: torch.Tensor) -> torch.Tensor:
         return logits / self.temperature
 
     def fit(self, logits: torch.Tensor, labels: torch.Tensor, lr: float = 0.01, max_iter: int = 100) -> float:
         criterion = nn.BCEWithLogitsLoss()
-        optimizer = torch.optim.LBFGS([self.temperature], lr=lr, max_iter=max_iter)
+        optimizer = torch.optim.LBFGS([self.log_temperature], lr=lr, max_iter=max_iter)
 
         def closure():
             optimizer.zero_grad()
@@ -2122,7 +2307,7 @@ def compute_ece(probs: np.ndarray, labels: np.ndarray, n_bins: int = 10):
 # The verified run had NO LR scheduler, NO early stopping, and NO gradient
 # clipping. Anything here beyond that is marked [beyond verified] at its site.
 
-def build_optimizer(model: AASISTHead, config: TrainConfig) -> torch.optim.Optimizer:
+def build_optimizer(model: nn.Module, config: TrainConfig) -> torch.optim.Optimizer:
     """
     AdamW over head parameters.
 
@@ -2138,12 +2323,75 @@ def build_optimizer(model: AASISTHead, config: TrainConfig) -> torch.optim.Optim
     )
 
 
+def augment_cached_features(
+    features: torch.Tensor,
+    mask: torch.Tensor,
+    config: TrainConfig,
+) -> torch.Tensor:
+    """Apply optional v2 robustness augmentation to valid cached feature frames."""
+    if (
+        config.feature_noise_std <= 0
+        and config.time_mask_probability <= 0
+        and config.feature_channel_dropout_probability <= 0
+    ):
+        return features
+
+    augmented = features.clone()
+    valid = mask.unsqueeze(-1)
+
+    if config.feature_noise_std > 0:
+        denom = valid.sum(dim=(1, 2)).clamp_min(1.0) * features.shape[-1]
+        mean = (augmented * valid).sum(dim=(1, 2)) / denom
+        centered = (augmented - mean[:, None, None]) * valid
+        scale = torch.sqrt(
+            centered.square().sum(dim=(1, 2)) / denom
+        ).clamp_min(1e-6)
+        noise = torch.randn_like(augmented) * scale[:, None, None]
+        augmented = augmented + config.feature_noise_std * noise * valid
+
+    if config.time_mask_probability > 0 and config.time_mask_max_frames > 0:
+        for index in range(augmented.shape[0]):
+            if torch.rand((), device=augmented.device) >= config.time_mask_probability:
+                continue
+            length = int(mask[index].sum().item())
+            if length <= 1:
+                continue
+            width = int(
+                torch.randint(
+                    1,
+                    min(config.time_mask_max_frames, length - 1) + 1,
+                    (),
+                    device=augmented.device,
+                ).item()
+            )
+            start = int(
+                torch.randint(0, length - width + 1, (), device=augmented.device).item()
+            )
+            augmented[index, start : start + width] = 0.0
+
+    channel_p = config.feature_channel_dropout_probability
+    if channel_p > 0:
+        if not 0.0 <= channel_p < 1.0:
+            raise ValueError("feature_channel_dropout_probability must be in [0, 1).")
+        keep = (
+            torch.rand(
+                augmented.shape[0], 1, augmented.shape[2],
+                device=augmented.device,
+            )
+            >= channel_p
+        ).to(augmented.dtype)
+        augmented = augmented * keep / (1.0 - channel_p)
+
+    return augmented * valid
+
+
 def train_one_epoch(
-    model: AASISTHead,
+    model: nn.Module,
     loader: DataLoader,
     optimizer: torch.optim.Optimizer,
     criterion: nn.Module,
     grad_clip: float = 0.0,
+    config: Optional[TrainConfig] = None,
 ) -> float:
     """
     One training epoch. Returns the mean of the per-batch losses.
@@ -2161,6 +2409,9 @@ def train_one_epoch(
         batch_feats = batch_feats.to(DEVICE)
         batch_mask = batch_mask.to(DEVICE)
         batch_labels = batch_labels.to(DEVICE)
+
+        if config is not None:
+            batch_feats = augment_cached_features(batch_feats, batch_mask, config)
 
         optimizer.zero_grad()
         logits = model(batch_feats, mask=batch_mask)
@@ -2180,7 +2431,7 @@ def train_one_epoch(
 
 @torch.no_grad()
 def collect_logits(
-    model: AASISTHead,
+    model: nn.Module,
     loader: DataLoader,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Run inference over a loader. Returns (logits, labels) as numpy arrays."""
@@ -2200,7 +2451,7 @@ def collect_logits(
 
 
 def evaluate(
-    model: AASISTHead,
+    model: nn.Module,
     loader: DataLoader,
     criterion: Optional[nn.Module] = None,
 ) -> Dict[str, float]:
@@ -2222,7 +2473,7 @@ def evaluate(
 
 
 def save_checkpoint(
-    model: AASISTHead,
+    model: nn.Module,
     optimizer: torch.optim.Optimizer,
     epoch: int,
     loss_history: List[float],
@@ -2277,7 +2528,7 @@ def save_checkpoint(
 
 def load_checkpoint(
     path: str,
-    model: Optional[AASISTHead] = None,
+    model: Optional[nn.Module] = None,
     optimizer: Optional[torch.optim.Optimizer] = None,
 ) -> Dict[str, Any]:
     """Restore a checkpoint. Builds the model from stored config if not supplied."""
@@ -2312,7 +2563,7 @@ def train_model(
     validate: bool = True,
     train_sampler: Optional[Sampler] = None,
     resume: bool = True,
-) -> Tuple[AASISTHead, Dict[str, Any]]:
+) -> Tuple[nn.Module, Dict[str, Any]]:
     """
     Train the head on cached frozen features.
 
@@ -2360,7 +2611,17 @@ def train_model(
         ckpt = load_checkpoint(last_path, model=model, optimizer=optimizer)
 
         stored = ckpt.get("config") or {}
-        for key in ("hidden_dim", "num_gat_layers", "dropout"):
+        for key in (
+            "hidden_dim",
+            "num_gat_layers",
+            "dropout",
+            "head_type",
+            "separate_layer_norms",
+            "feature_noise_std",
+            "time_mask_probability",
+            "time_mask_max_frames",
+            "feature_channel_dropout_probability",
+        ):
             if key in stored and stored[key] != getattr(config, key):
                 raise ValueError(
                     f"Checkpoint {last_path} was trained with {key}="
@@ -2414,7 +2675,12 @@ def train_model(
             train_sampler.set_epoch(epoch)
 
         avg_loss = train_one_epoch(
-            model, train_loader, optimizer, criterion, config.grad_clip
+            model,
+            train_loader,
+            optimizer,
+            criterion,
+            config.grad_clip,
+            config=config,
         )
         loss_history.append(avg_loss)
 
@@ -2486,13 +2752,11 @@ def train_model(
 # than renaming existing fields, so her side does not break silently.
 #
 # Two values in AnalysisResult are deliberately absent rather than invented:
-#   * detected_language is "unknown" — there is no language classifier here.
-#   * language_eer is None until a per-language EER table exists AND a language
-#     is known. A fabricated per-language EER would flow straight into the PDF.
-#
-# evaluate_dataset(..., write_language_eer_file=True) is the one place that
-# PRODUCES checkpoints/per_language_eer.json — run it once on the real test
-# split and analyze_bytes() picks the table up automatically from then on.
+#   * detected_language is "unknown" unless a caller supplies a language hint.
+#     The previous SpeechBrain path was removed because its output parsing,
+#     sample-rate handling, and 16-language coverage were all incorrect.
+#   * language_eer remains None. A test-set aggregate is not an individual
+#     clip's risk estimate and must not be presented as one in the UI or PDF.
 #
 # Record any change to this section in docs/TEAM_SYNC_LOG.md under
 # "Interface changes".
@@ -2509,14 +2773,11 @@ class AnalysisResult:
 
     Fields:
         verdict: "real" | "uncertain" | "fake". See VERDICT_* thresholds.
-        confidence: probability of the reported class, in [0.5, 1.0] for a
-            decided verdict. For "uncertain" it is max(p_fake, 1 - p_fake), which
-            will be close to 0.5 by construction.
-        detected_language: ISO-ish language name, or "unknown". There is no
-            language classifier in this pipeline, so it is always "unknown"
-            unless a caller supplies a language hint.
-        language_eer: validation EER for the detected language, or None when the
-            language is unknown or no per-language table exists yet.
+        confidence: model score for the reported class, not a guarantee of
+            real-world correctness. For "uncertain" it is max(p_fake, 1-p_fake).
+        detected_language: caller-supplied supported language, or "unknown".
+        language_eer: deprecated compatibility field. Always None; benchmark
+            EER belongs in evaluation reports, not a per-clip result.
         raw_score: the model's UNCALIBRATED logit. Higher = more fake.
         audio_hash: sha256 of the exact input bytes, for provenance/dedup.
     """
@@ -2531,32 +2792,12 @@ class AnalysisResult:
 
 
 # --- Frozen decision thresholds -------------------------------------------
-# These operate on the CALIBRATED probability of "fake".
-#
-# Frozen defaults, chosen deliberately rather than derived, because a
-# validation-derived operating point is not yet available:
-#
-#   p_fake < 0.35            -> "real"
-#   0.35 <= p_fake <= 0.65   -> "uncertain"
-#   p_fake > 0.65            -> "fake"
-#
-# Rationale: a symmetric +/-0.15 band around 0.5. Both error directions cost the
-# same for this project (no asymmetric real-world penalty has been specified), and
-# an explicit abstain band matters more than a tuned cut for a demo/report UI —
-# it keeps borderline clips out of confident-looking claims.
-#
-# NOTE: step6_summary.json also carries `val_eer_threshold`. That threshold lives
-# in BONAFIDE-SCORE space (negated logits — see SCORE ORIENTATION in Section 9),
-# not calibrated-probability space, so it is deliberately NOT used here. Converting
-# it correctly is the right follow-up once real numbers exist.
-#
-# TODO(thresholds): re-derive from the validation set once Step 6 numbers land —
-# e.g. pick the band edges at target FAR/FRR rather than symmetric guesses.
-VERDICT_REAL_MAX_P_FAKE = 0.35
-VERDICT_FAKE_MIN_P_FAKE = 0.65
-
-# Optional per-language EER table, written by a later evaluation step.
-PER_LANGUAGE_EER_FILE = "per_language_eer.json"
+# Compatibility aliases for callers that imported these names. The canonical
+# policy and its provenance now live in voice_guard_core.py. The v1 values are
+# preserved until a v2 validation run can derive replacement operating points;
+# the already-observed v1 test set must never be used to tune them.
+VERDICT_REAL_MAX_P_FAKE = DEFAULT_DECISION_POLICY.real_max_p_fake
+VERDICT_FAKE_MIN_P_FAKE = DEFAULT_DECISION_POLICY.fake_min_p_fake
 
 
 def verdict_from_p_fake(
@@ -2564,11 +2805,22 @@ def verdict_from_p_fake(
     real_max: float = VERDICT_REAL_MAX_P_FAKE,
     fake_min: float = VERDICT_FAKE_MIN_P_FAKE,
 ) -> str:
-    if p_fake < real_max:
-        return "real"
-    if p_fake > fake_min:
-        return "fake"
-    return "uncertain"
+    if (
+        real_max == DEFAULT_DECISION_POLICY.real_max_p_fake
+        and fake_min == DEFAULT_DECISION_POLICY.fake_min_p_fake
+    ):
+        return verdict_from_probability(p_fake)
+    from voice_guard_core import DecisionPolicy
+
+    return verdict_from_probability(
+        p_fake,
+        DecisionPolicy(
+            policy_id="caller-supplied",
+            real_max_p_fake=real_max,
+            fake_min_p_fake=fake_min,
+            provenance="Caller-supplied thresholds.",
+        ),
+    )
 
 
 def decode_audio_bytes(audio_bytes: bytes) -> Tuple[np.ndarray, int]:
@@ -2605,7 +2857,6 @@ def decode_audio_bytes(audio_bytes: bytes) -> Tuple[np.ndarray, int]:
 
     try:
         from pydub import AudioSegment
-        import tempfile
 
         audio = AudioSegment.from_file(io.BytesIO(audio_bytes))
         waveform_array = np.array(audio.get_array_of_samples(), dtype=np.float32)
@@ -2613,9 +2864,8 @@ def decode_audio_bytes(audio_bytes: bytes) -> Tuple[np.ndarray, int]:
         if audio.channels > 1:
             waveform_array = waveform_array.reshape((-1, audio.channels)).mean(axis=1)
 
-        if audio.sample_width > 1:
-            max_val = (1 << (8 * audio.sample_width - 1))
-            waveform_array = waveform_array / max_val
+        max_val = 1 << (8 * audio.sample_width - 1)
+        waveform_array = waveform_array / max_val
 
         return waveform_array, audio.frame_rate
     except Exception as exc:  # noqa: BLE001
@@ -2627,172 +2877,24 @@ def decode_audio_bytes(audio_bytes: bytes) -> Tuple[np.ndarray, int]:
     )
 
 
-# Language identification model cache
-_LANGUAGE_ID_MODEL: Optional[Any] = None
-
-# Mapping from VoxLingua107 language codes to our display names (ISO 639-3 codes)
-LANGUAGE_CODE_TO_NAME = {
-    "asm": "Assamese",
-    "ben": "Bengali",
-    "brx": "Bodo",
-    "doi": "Dogri",
-    "eng": "English",
-    "guj": "Gujarati",
-    "hin": "Hindi",
-    "kan": "Kannada",
-    "mal": "Malayalam",
-    "mni": "Manipuri",
-    "mar": "Marathi",
-    "nep": "Nepali",
-    "ory": "Odia",
-    "san": "Sanskrit",
-    "tam": "Tamil",
-    "tel": "Telugu",
-}
-
-
-def load_language_id_model() -> Any:
-    """
-    Load the SpeechBrain VoxLingua107 language identification model.
-
-    Cached after first call. Returns the classifier.
-
-    Uses speechbrain/lang-id-voxlingua107-ecapa (~85MB vs ~1GB for MMS).
-    Saves model to /tmp/lang_id_model for quick repeated loads.
-    """
-    global _LANGUAGE_ID_MODEL
-
-    if _LANGUAGE_ID_MODEL is not None:
-        return _LANGUAGE_ID_MODEL
-
-    try:
-        import os as os_module
-        from speechbrain.pretrained import EncoderClassifier
-
-        # Use /tmp for cache (temp storage, OK for Kaggle/Colab)
-        model_dir = "/tmp/lang_id_model"
-        os_module.makedirs(model_dir, exist_ok=True)
-
-        # Load the VoxLingua107 model from SpeechBrain
-        classifier = EncoderClassifier.from_hparams(
-            source="speechbrain/lang-id-voxlingua107-ecapa",
-            savedir=model_dir,
-            run_opts={"device": DEVICE},
-        )
-        if classifier is None:
-            raise RuntimeError("EncoderClassifier.from_hparams returned None")
-
-        _LANGUAGE_ID_MODEL = classifier
-        print(f"Language ID model loaded successfully: speechbrain/lang-id-voxlingua107-ecapa")
-        return classifier
-    except Exception as exc:
-        print(f"Failed to load language ID model: {type(exc).__name__}: {exc}")
-        _LANGUAGE_ID_MODEL = None
-        raise
-
-
-@torch.no_grad()
-def detect_language(
-    waveform: np.ndarray,
-    sample_rate: int = TARGET_SAMPLE_RATE,
-) -> str:
-    """
-    Detect language from a waveform using SpeechBrain's VoxLingua107 model.
-
-    Returns a display name (e.g. "Hindi") if detected and covered by our 16 languages,
-    or "unknown" if detection fails, language is not covered, or model is unavailable.
-
-    Failures are caught silently — model availability issues never crash the app.
-    """
-    try:
-        classifier = load_language_id_model()
-    except Exception:
-        # Model load failed; silently fall back to "unknown"
-        return "unknown"
-
-    try:
-        # Validate classifier is usable
-        if classifier is None:
-            return "unknown"
-
-        # Convert numpy array to torch tensor
-        if isinstance(waveform, np.ndarray):
-            waveform_tensor = torch.from_numpy(waveform).float()
-        else:
-            waveform_tensor = torch.tensor(waveform, dtype=torch.float32)
-
-        # Reshape for batch processing if needed (add batch dimension)
-        if waveform_tensor.ndim == 1:
-            waveform_tensor = waveform_tensor.unsqueeze(0)
-
-        # Run language identification via classify_batch
-        # This returns (predictions, language_codes) or similar structure
-        outputs = classifier.classify_batch(waveform_tensor)
-
-        if outputs is None:
-            return "unknown"
-
-        # Parse the output from SpeechBrain's classifier
-        # Format is typically: output_dict or (pred_logits, pred_probs, pred_label)
-        # We need to extract the language code
-        predicted_lang = None
-
-        if isinstance(outputs, dict):
-            # If dict, look for 'pred_label' or similar key
-            predicted_lang = outputs.get("pred_label", outputs.get("label"))
-        elif isinstance(outputs, (tuple, list)):
-            # If tuple/list, the language code is typically the last element or at index 2
-            if len(outputs) >= 3:
-                predicted_lang = outputs[2]  # Usually (logits, probs, label)
-            elif len(outputs) >= 1:
-                predicted_lang = outputs[-1]  # Fall back to last element
-        elif isinstance(outputs, torch.Tensor):
-            # If tensor, try to get the top prediction
-            if outputs.ndim > 1:
-                predicted_lang = outputs.argmax(dim=-1).item()
-            else:
-                predicted_lang = outputs.item()
-
-        # Handle tensor outputs that might need conversion to string
-        if isinstance(predicted_lang, torch.Tensor):
-            if predicted_lang.numel() == 1:
-                predicted_lang = predicted_lang.item()
-            else:
-                predicted_lang = str(predicted_lang)
-
-        # Convert to string if needed
-        if predicted_lang is not None and not isinstance(predicted_lang, str):
-            predicted_lang = str(predicted_lang).strip()
-
-        if predicted_lang is None or predicted_lang == "":
-            return "unknown"
-
-        # Map language code to our display name
-        display_name = LANGUAGE_CODE_TO_NAME.get(predicted_lang)
-        if display_name is None:
-            return "unknown"
-
-        return display_name
-    except Exception:
-        # Any inference error: silently fall back to "unknown"
-        return "unknown"
-
-
 @dataclass
 class InferenceBundle:
     """Everything needed to score a clip, loaded once and cached."""
 
-    head: AASISTHead
+    head: nn.Module
     temperature: float
-    per_language_eer: Dict[str, float]
     checkpoint_path: str
     checkpoint_epoch: int
     config: Dict[str, Any]
     summary_path: Optional[str]
+    calibration_ece_before: Optional[float]
+    calibration_ece_after: Optional[float]
+    validation_eer_threshold_bonafide: Optional[float]
 
 
-# Module-level cache so repeated analyze_bytes() calls do not touch disk.
-_INFERENCE_BUNDLE: Optional[InferenceBundle] = None
+# Keyed cache so tests and services using more than one checkpoint directory do
+# not silently receive whichever model happened to load first.
+_INFERENCE_BUNDLES: Dict[Tuple[str, str], InferenceBundle] = {}
 
 
 def load_inference_bundle(
@@ -2801,38 +2903,50 @@ def load_inference_bundle(
     force_reload: bool = False,
 ) -> InferenceBundle:
     """
-    Load the trained head, calibration temperature, and per-language EER table.
+    Load the trained head and calibration metadata.
 
     Cached at module level; subsequent calls return the same bundle. The frozen
     frontend has its own cache in load_frontend(), so it is not reloaded either.
     """
-    global _INFERENCE_BUNDLE
-
-    if _INFERENCE_BUNDLE is not None and not force_reload:
-        return _INFERENCE_BUNDLE
-
-    best_path = os.path.join(checkpoint_dir, "best_model.pt")
+    best_path = os.path.realpath(os.path.join(checkpoint_dir, "best_model.pt"))
     if not os.path.exists(best_path):
         raise FileNotFoundError(
             f"No trained checkpoint at {best_path}. Run Step 6 first "
             "(model_pipeline.run_step6_resilient())."
         )
 
-    ckpt = load_checkpoint(best_path)
-    head = ckpt["model"]
-    head.eval()
-
     # Temperature: from step6_summary.json if present. 1.0 (no-op) otherwise, so
     # inference degrades to uncalibrated rather than refusing to run.
     if summary_path is None:
         summary_path = os.path.join(checkpoint_dir, "step6_summary.json")
+    summary_path = os.path.realpath(summary_path)
+    cache_key = (best_path, summary_path)
+    if not force_reload and cache_key in _INFERENCE_BUNDLES:
+        return _INFERENCE_BUNDLES[cache_key]
+
+    ckpt = load_checkpoint(best_path)
+    head = ckpt["model"]
+    head.eval()
 
     temperature = 1.0
     resolved_summary: Optional[str] = None
+    ece_before: Optional[float] = None
+    ece_after: Optional[float] = None
+    val_eer_threshold_bonafide: Optional[float] = None
     if os.path.exists(summary_path):
         with open(summary_path, "r", encoding="utf-8") as f:
             summary = json.load(f)
         temperature = float(summary.get("temperature", 1.0))
+        if summary.get("ece_before") is not None:
+            ece_before = float(summary["ece_before"])
+        if summary.get("ece_after") is not None:
+            ece_after = float(summary["ece_after"])
+        threshold_value = summary.get(
+            "val_eer_threshold_bonafide_score",
+            summary.get("val_eer_threshold"),
+        )
+        if threshold_value is not None:
+            val_eer_threshold_bonafide = float(threshold_value)
         resolved_summary = summary_path
         if temperature <= 0:
             raise ValueError(
@@ -2844,31 +2958,24 @@ def load_inference_bundle(
             "(uncalibrated). Confidence values will be less trustworthy."
         )
 
-    # Per-language EER table, if a later evaluation step has produced one.
-    per_language_eer: Dict[str, float] = {}
-    lang_path = os.path.join(checkpoint_dir, PER_LANGUAGE_EER_FILE)
-    if os.path.exists(lang_path):
-        with open(lang_path, "r", encoding="utf-8") as f:
-            raw = json.load(f)
-        per_language_eer = {str(k): float(v) for k, v in raw.items()}
-
-    _INFERENCE_BUNDLE = InferenceBundle(
+    bundle = InferenceBundle(
         head=head,
         temperature=temperature,
-        per_language_eer=per_language_eer,
         checkpoint_path=best_path,
         checkpoint_epoch=int(ckpt.get("epoch", -1)),
         config=ckpt.get("config", {}),
         summary_path=resolved_summary,
+        calibration_ece_before=ece_before,
+        calibration_ece_after=ece_after,
+        validation_eer_threshold_bonafide=val_eer_threshold_bonafide,
     )
+    _INFERENCE_BUNDLES[cache_key] = bundle
 
     print(
         f"Inference bundle loaded: {best_path} (epoch "
-        f"{_INFERENCE_BUNDLE.checkpoint_epoch}), temperature="
-        f"{temperature:.4f}, per-language EER entries="
-        f"{len(per_language_eer)}"
+        f"{bundle.checkpoint_epoch}), temperature={temperature:.4f}"
     )
-    return _INFERENCE_BUNDLE
+    return bundle
 
 
 @torch.no_grad()
@@ -2895,7 +3002,7 @@ def score_waveform(
     raw_logit = float(logit.reshape(-1)[0].item())
 
     calibrated = raw_logit / bundle.temperature
-    p_fake = 1.0 / (1.0 + float(np.exp(-calibrated)))
+    p_fake = stable_sigmoid(calibrated)
 
     return raw_logit, p_fake
 
@@ -2910,20 +3017,19 @@ def analyze_bytes(
 
     Args:
         audio_bytes: encoded audio (wav/flac/mp3/ogg/m4a).
-        language_hint: optional caller-supplied language. If provided, it is used
-            as the detected_language. Otherwise, the MMS-LID model attempts to
-            detect the language. Detection failures silently fall back to "unknown".
+        language_hint: optional caller-declared language. This is metadata only;
+            no automatic language classifier runs and it never changes the verdict.
 
     Returns a fully populated AnalysisResult.
     """
     import hashlib
 
+    validate_encoded_audio_size(audio_bytes)
     audio_hash = hashlib.sha256(audio_bytes).hexdigest()
+    waveform, sr = decode_audio_bytes(audio_bytes)
+    quality = validate_decoded_audio(waveform, sr)
 
     bundle = load_inference_bundle(checkpoint_dir=checkpoint_dir)
-
-    waveform, sr = decode_audio_bytes(audio_bytes)
-    duration_s = len(waveform) / sr if sr else 0.0
 
     raw_logit, p_fake = score_waveform(waveform, sr, bundle=bundle)
     verdict = verdict_from_p_fake(p_fake)
@@ -2934,26 +3040,14 @@ def analyze_bytes(
         1.0 - p_fake if verdict == "real" else max(p_fake, 1.0 - p_fake)
     )
 
-    # Detect language: use hint if provided, otherwise run the LID model.
-    # Language detection is independent of the verdict path and falls back
-    # silently to "unknown" on any failure.
-    if language_hint:
-        detected_language = language_hint
-        language_source = "hint"
-    else:
-        detected_language = detect_language(waveform, sr)
-        language_source = "model" if detected_language != "unknown" else "none"
-
-    # Look up per-language EER for the detected language.
-    language_eer: Optional[float] = None
-    if detected_language != "unknown" and bundle.per_language_eer:
-        language_eer = bundle.per_language_eer.get(detected_language)
+    detected_language = normalize_language_hint(language_hint)
+    language_source = "user_declared" if detected_language != "unknown" else "none"
 
     return AnalysisResult(
         verdict=verdict,
         confidence=float(confidence),
         detected_language=detected_language,
-        language_eer=language_eer,
+        language_eer=None,
         raw_score=float(raw_logit),
         audio_hash=audio_hash,
         metadata={
@@ -2963,14 +3057,42 @@ def analyze_bytes(
                 "real_max_p_fake": VERDICT_REAL_MAX_P_FAKE,
                 "fake_min_p_fake": VERDICT_FAKE_MIN_P_FAKE,
             },
-            "duration_seconds": round(duration_s, 3),
+            "decision_policy_id": DEFAULT_DECISION_POLICY.policy_id,
+            "decision_policy_provenance": DEFAULT_DECISION_POLICY.provenance,
+            "duration_seconds": quality["duration_seconds"],
             "sample_rate_in": sr,
+            "audio_quality": quality,
+            "input_limits": {
+                "max_bytes": DEFAULT_AUDIO_POLICY.max_bytes,
+                "min_duration_seconds": DEFAULT_AUDIO_POLICY.min_duration_seconds,
+                "max_duration_seconds": DEFAULT_AUDIO_POLICY.max_duration_seconds,
+            },
             "frontend": FRONTEND_MODEL_NAME,
             "checkpoint": os.path.basename(bundle.checkpoint_path),
             "checkpoint_epoch": bundle.checkpoint_epoch,
             "calibrated": bundle.summary_path is not None,
+            "calibration_ece_before": bundle.calibration_ece_before,
+            "calibration_ece_after": bundle.calibration_ece_after,
+            "calibration_improved_ece": (
+                bundle.calibration_ece_after <= bundle.calibration_ece_before
+                if bundle.calibration_ece_before is not None
+                and bundle.calibration_ece_after is not None
+                else None
+            ),
+            "validation_eer_threshold_bonafide_score": (
+                bundle.validation_eer_threshold_bonafide
+            ),
+            "validation_eer_threshold_fake_logit": (
+                -bundle.validation_eer_threshold_bonafide
+                if bundle.validation_eer_threshold_bonafide is not None
+                else None
+            ),
             "language_source": language_source,
-            "language_eer_available": bool(bundle.per_language_eer),
+            "language_note": (
+                "User-declared metadata; not inferred by the authenticity model."
+                if language_source == "user_declared"
+                else "No language was inferred."
+            ),
         },
     )
 
@@ -3130,7 +3252,7 @@ def evaluate_dataset(
     cache_dir: str = FEATURE_CACHE_DIR,
     cache_split_name: str = "eval",
     language_lookup: Optional[Dict[str, str]] = None,
-    decision_threshold: float = 0.5,
+    decision_threshold: Optional[float] = None,
     batch_size: int = 16,
     extract_batch_size: int = 8,
     min_language_support: int = 1,
@@ -3149,21 +3271,23 @@ def evaluate_dataset(
             safe (load_features_for_ids only reads what it's asked for) but
             wastes disk — prefer a name matching what you're evaluating (e.g.
             "test").
-        decision_threshold: cut on CALIBRATED P(fake) used ONLY for
+        decision_threshold: cut on temperature-scaled P(fake) used ONLY for
             accuracy/precision/recall/f1/confusion_matrix, which need a single
-            binary decision. This is a different concept from:
+            binary decision. If omitted, the validation EER operating threshold
+            from step6_summary.json is converted from bonafide-score orientation
+            to fake-logit orientation and then to P(fake). This is a different
+            concept from:
               * the banded real/uncertain/fake verdict thresholds in Section 11
                 (VERDICT_REAL_MAX_P_FAKE / VERDICT_FAKE_MIN_P_FAKE), and
-              * the EER operating threshold (bonafide-score space, returned
-                separately as pooled.eer_threshold) — EER itself does not depend
-                on this argument at all.
+              * the EER operating threshold (returned explicitly in both
+                bonafide-score and fake-logit orientation) — EER itself does not
+                depend on this argument at all.
         min_language_support: languages with fewer than this many clips are
             still reported (with their n) but their EER is set to None rather
             than computed on too few points to be meaningful.
-        write_language_eer_file: if True, writes checkpoint_dir/per_language_eer.json
-            from this run's per-language EER. That file is what analyze_bytes()
-            reads for AnalysisResult.language_eer — this is deliberately the one
-            place that produces it, so nothing downstream fabricates a number.
+        write_language_eer_file: compatibility name. If True, writes a clearly
+            labelled ``per_language_test_metrics.json`` benchmark artifact.
+            Per-language test EER is never consumed as a per-clip confidence.
         include_per_clip: if True, adds result["per_clip"] — one record per
             evaluated clip (clip_id, language, true_label, predicted_label,
             calibrated_p_fake, verdict) for error analysis. Off by default since
@@ -3197,6 +3321,20 @@ def evaluate_dataset(
         _, language_lookup = build_label_lookup()
 
     bundle = load_inference_bundle(checkpoint_dir=checkpoint_dir)
+    if decision_threshold is None:
+        if bundle.validation_eer_threshold_bonafide is None:
+            raise ValueError(
+                "No decision_threshold was supplied and the checkpoint summary "
+                "has no validation EER threshold. Derive it from validation data; "
+                "do not choose it on the test set."
+            )
+        validation_fake_logit = -bundle.validation_eer_threshold_bonafide
+        decision_threshold = stable_sigmoid(validation_fake_logit / bundle.temperature)
+        decision_threshold_source = "validation_eer_operating_point"
+    else:
+        if not 0.0 < decision_threshold < 1.0:
+            raise ValueError("decision_threshold must be between 0 and 1.")
+        decision_threshold_source = "caller_supplied"
 
     ensure_features_cached_for_ids(
         clip_ids=list(label_lookup),
@@ -3229,7 +3367,7 @@ def evaluate_dataset(
     raw_logits, y_true = collect_logits(bundle.head, loader)
 
     calibrated_logits = raw_logits / bundle.temperature
-    p_fake = 1.0 / (1.0 + np.exp(-calibrated_logits))
+    p_fake = 1.0 / (1.0 + np.exp(-np.clip(calibrated_logits, -80.0, 80.0)))
     y_pred = (p_fake > decision_threshold).astype(int)
 
     # Computed once, shared by per_language and per_clip below.
@@ -3247,15 +3385,18 @@ def evaluate_dataset(
     if n_real_pooled >= 1 and n_fake_pooled >= 1:
         pooled_eer, pooled_eer_threshold = eer_from_logits_and_labels(raw_logits, y_true)
         pooled["eer"] = float(pooled_eer)
-        pooled["eer_threshold"] = float(pooled_eer_threshold)
+        pooled["eer_threshold_bonafide_score"] = float(pooled_eer_threshold)
+        pooled["eer_threshold_fake_logit"] = float(-pooled_eer_threshold)
     else:
         pooled["eer"] = None
-        pooled["eer_threshold"] = None
+        pooled["eer_threshold_bonafide_score"] = None
+        pooled["eer_threshold_fake_logit"] = None
         pooled["eer_note"] = (
             f"pooled EER undefined: only one class present after excluding "
             f"missing clips (n_real={n_real_pooled}, n_fake={n_fake_pooled})"
         )
     pooled["decision_threshold_p_fake"] = decision_threshold
+    pooled["decision_threshold_source"] = decision_threshold_source
 
     per_language: Dict[str, Dict[str, Any]] = {}
     for lang in sorted(set(lang_of)):
@@ -3278,15 +3419,26 @@ def evaluate_dataset(
         per_language[lang] = entry
 
     if write_language_eer_file:
-        lang_path = os.path.join(checkpoint_dir, PER_LANGUAGE_EER_FILE)
+        lang_path = os.path.join(checkpoint_dir, "per_language_test_metrics.json")
         os.makedirs(checkpoint_dir, exist_ok=True)
         with open(lang_path, "w", encoding="utf-8") as f:
             json.dump(
-                {l: e["eer"] for l, e in per_language.items() if e["eer"] is not None},
-                f, indent=2,
+                {
+                    "source_split": cache_split_name,
+                    "metric_scope": "aggregate_benchmark_only",
+                    "warning": (
+                        "Do not present these aggregate test-set EER values as "
+                        "confidence or risk for an individual clip."
+                    ),
+                    "generated_utc": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
+                    ),
+                    "languages": per_language,
+                },
+                f,
+                indent=2,
             )
-        print(f"Wrote {lang_path} — analyze_bytes() will pick it up on next load "
-              "(or call load_inference_bundle(force_reload=True)).")
+        print(f"Wrote benchmark-only per-language metrics to {lang_path}.")
 
     result = {
         "n_requested": len(label_lookup),
@@ -3343,6 +3495,8 @@ def evaluate_dataset(
 
 def run_step6_training(
     config: Optional[TrainConfig] = None,
+    split_file: str = SPLIT_FILE,
+    metadata_file: str = METADATA_FILE,
     cache_dir: str = FEATURE_CACHE_DIR,
     checkpoint_dir: str = CHECKPOINT_DIR,
     shard_size: int = 500,
@@ -3358,7 +3512,7 @@ def run_step6_training(
     Full Step 6 run: guards -> feature cache -> train -> calibrate.
 
     Stages:
-        1. assert_split_integrity()   — refuse to run on a corrupted split
+        1. assert_split_integrity()   — refuse exact-ID and proxy-group leakage
         2. verify_frontend_frozen()   — assert 0 trainable frontend params
         3. load frozen split + label lookup
         4. build_feature_caches_streaming() for train + validation in ONE pass
@@ -3386,8 +3540,14 @@ def run_step6_training(
 
     # --- 1-2. guards --------------------------------------------------------
     print("\n[1/6] Verifying frozen split integrity...")
-    assert_split_integrity()
-    print("  split OK — 31,102 clips, no duplicates, no cross-split overlap.")
+    splits = load_frozen_split(split_file)
+    assert_split_integrity(splits, require_group_disjoint=True)
+    metadata = load_verified_metadata(metadata_file)
+    assert_split_coverage(splits, metadata)
+    print(
+        "  split OK — exact IDs/source-family proxies are group-disjoint and "
+        "every language/label stratum is represented."
+    )
 
     print("\n[2/6] Verifying frontend is frozen...")
     n_trainable = verify_frontend_frozen()
@@ -3395,8 +3555,8 @@ def run_step6_training(
 
     # --- 3. split + labels --------------------------------------------------
     print("\n[3/6] Loading frozen split and verified metadata...")
-    train_ids, val_ids, _test_ids = load_frozen_split_sets()
-    label_lookup, language_lookup = build_label_lookup()
+    train_ids, val_ids, _test_ids = load_frozen_split_sets(split_file)
+    label_lookup, language_lookup = build_label_lookup(metadata)
     print(f"  train {len(train_ids):,} | validation {len(val_ids):,}")
     print("  test split intentionally untouched in Step 6.")
 
@@ -3414,6 +3574,18 @@ def run_step6_training(
                 raise ValueError(
                     f"skip_extraction=True but the '{name}' cache is missing or "
                     "incomplete. Run without skip_extraction first."
+                )
+            expected_fingerprint = fingerprint_clip_ids(targets[name])
+            actual_fingerprint = man.get("target_ids_sha256")
+            if actual_fingerprint != expected_fingerprint:
+                reason = (
+                    "has no split fingerprint (legacy cache)"
+                    if not actual_fingerprint
+                    else "belongs to a different set of clip IDs"
+                )
+                raise RuntimeError(
+                    f"skip_extraction=True but the '{name}' cache {reason}. "
+                    "Use a fresh cache directory for this split."
                 )
     else:
         print("\n[4/6] Building feature cache (single streaming pass)...")
@@ -3540,10 +3712,23 @@ def run_step6_training(
         )
 
     # ECE is computed on P(fake), matching the training target (1 = fake).
-    probs_raw = 1.0 / (1.0 + np.exp(-val_logits))
-    probs_cal = 1.0 / (1.0 + np.exp(-calibrated_logits))
+    probs_raw = 1.0 / (1.0 + np.exp(-np.clip(val_logits, -80.0, 80.0)))
+    probs_cal = 1.0 / (1.0 + np.exp(-np.clip(calibrated_logits, -80.0, 80.0)))
     ece_raw, _ = compute_ece(probs_raw, val_labels)
     ece_cal, _ = compute_ece(probs_cal, val_labels)
+    calibration_criterion = nn.BCEWithLogitsLoss()
+    nll_raw = float(
+        calibration_criterion(
+            torch.from_numpy(val_logits).float(),
+            torch.from_numpy(val_labels).float(),
+        ).item()
+    )
+    nll_cal = float(
+        calibration_criterion(
+            torch.from_numpy(calibrated_logits).float(),
+            torch.from_numpy(val_labels).float(),
+        ).item()
+    )
 
     # Temperature scaling is monotonic, so EER is unchanged by construction —
     # recomputed here only as a guard against a sign/orientation regression.
@@ -3553,10 +3738,18 @@ def run_step6_training(
     print(f"  temperature         : {temperature:.4f}")
     print(f"  ECE before          : {ece_raw:.4f}")
     print(f"  ECE after           : {ece_cal:.4f}")
+    print(f"  NLL before          : {nll_raw:.4f}")
+    print(f"  NLL after           : {nll_cal:.4f}")
     print(f"  EER after scaling   : {calibrated_eer * 100:.2f}% (should be unchanged)")
+
+    with open(split_file, "rb") as split_stream:
+        split_sha256 = hashlib.sha256(split_stream.read()).hexdigest()
 
     summary = {
         "config": config.__dict__,
+        "split_protocol": "v2-group-disjoint",
+        "split_file": os.path.realpath(split_file),
+        "split_sha256": split_sha256,
         "num_train": len(train_data),
         "num_val": len(val_data),
         "loss_history": train_summary["loss_history"],
@@ -3564,10 +3757,18 @@ def run_step6_training(
         "best_val_eer": train_summary["best_eer"],
         "best_checkpoint": train_summary["best_path"],
         "val_eer": float(uncalibrated_eer),
+        # Keep the legacy key for old checkpoints, but write both orientations
+        # explicitly so robustness/evaluation code cannot apply the sign backwards.
         "val_eer_threshold": float(threshold),
+        "val_eer_threshold_bonafide_score": float(threshold),
+        "val_eer_threshold_fake_logit": float(-threshold),
         "temperature": float(temperature),
         "ece_before": float(ece_raw),
         "ece_after": float(ece_cal),
+        "calibration_improved_ece": bool(ece_cal <= ece_raw),
+        "nll_before": nll_raw,
+        "nll_after": nll_cal,
+        "calibration_improved_nll": bool(nll_cal <= nll_raw),
     }
 
     results_path = os.path.join(checkpoint_dir, "step6_summary.json")
@@ -3683,6 +3884,7 @@ def print_status_report(
     cache_dir: str = FEATURE_CACHE_DIR,
     checkpoint_dir: str = CHECKPOINT_DIR,
     config: Optional[TrainConfig] = None,
+    split_file: str = SPLIT_FILE,
 ) -> Dict[str, Any]:
     """
     One glance at where the run stands. Reads only on-disk state, so it is
@@ -3700,7 +3902,7 @@ def print_status_report(
 
     print("\nFEATURE CACHE")
     try:
-        train_ids, val_ids, _ = load_frozen_split_sets()
+        train_ids, val_ids, _ = load_frozen_split_sets(split_file)
         expected = {"train": len(train_ids), "validation": len(val_ids)}
     except Exception:  # noqa: BLE001
         expected = {}
@@ -3784,8 +3986,7 @@ def write_git_ready_summary(
     checkpoint_dir: str,
 ) -> str:
     """
-    Write docs/STEP6_RESULTS.md the moment training + calibration finish, so the
-    next action is a commit and nothing is ambiguous about whether it is done.
+    Write docs/STEP6_RESULTS.md after training + calibration for human review.
     """
     docs_dir = os.path.join(repo_dir, "docs")
     os.makedirs(docs_dir, exist_ok=True)
@@ -3803,7 +4004,7 @@ def write_git_ready_summary(
         "## Headline",
         "",
         f"- **Validation EER: {summary['val_eer'] * 100:.2f}%**",
-        f"- Best checkpoint val EER: "
+        "- Best checkpoint val EER: "
         + (
             f"{summary['best_val_eer'] * 100:.2f}%"
             if summary.get("best_val_eer") is not None else "n/a"
@@ -3811,14 +4012,17 @@ def write_git_ready_summary(
         f"- ECE before calibration: {summary['ece_before']:.4f}",
         f"- ECE after calibration: {summary['ece_after']:.4f}",
         f"- Temperature: {summary['temperature']:.4f}",
-        f"- EER decision threshold: {summary['val_eer_threshold']:.4f}",
+        f"- EER threshold (bonafide-score orientation): "
+        f"{summary['val_eer_threshold_bonafide_score']:.4f}",
+        f"- EER threshold (fake-logit orientation): "
+        f"{summary['val_eer_threshold_fake_logit']:.4f}",
         "",
         "## Data",
         "",
         f"- Train clips: {summary['num_train']:,}",
         f"- Validation clips: {summary['num_val']:,}",
-        "- Split: frozen `data_pipeline/split_ids.json` (31,102 clips), loaded "
-        "as-is, never regenerated.",
+        f"- Split protocol: {summary.get('split_protocol', 'unknown')}",
+        f"- Split SHA-256: `{summary.get('split_sha256', 'unknown')}`",
         "- Test split untouched — Step 6 is training + validation-based selection "
         "only.",
         "",
@@ -3876,8 +4080,8 @@ def write_git_ready_summary(
         "- Features cached in float16 (halves cache size; the Step 5 smoke test "
         "ran fp32).",
         "- 1 seed, not 3 — compressed 15-day timeline.",
-        "- Metadata carries no speaker field, so speaker-disjointness across "
-        "splits cannot be verified from this repo.",
+        "- Group-disjointness is enforced for the supplied grouping metadata. "
+        "A proxy group is still weaker than verified speaker/source/prompt IDs.",
         "",
         f"- Checkpoints: `{os.path.basename(checkpoint_dir)}/best_model.pt`, "
         f"`{os.path.basename(checkpoint_dir)}/last_model.pt`",
@@ -3934,8 +4138,12 @@ def write_test_set_summary(
         f"- Recall: {pooled['recall'] * 100:.2f}%",
         f"- F1: {pooled['f1']:.4f}",
         f"- Decision threshold: P(fake) > {pooled['decision_threshold_p_fake']} "
-        "(used for accuracy/precision/recall/f1/confusion matrix only — EER "
-        "itself is threshold-independent)",
+        f"(source: {pooled.get('decision_threshold_source', 'unknown')}; used "
+        "for accuracy/precision/recall/f1/confusion matrix only - EER itself "
+        "is threshold-independent)",
+        f"- EER threshold (bonafide score): "
+        f"{pooled.get('eer_threshold_bonafide_score')}",
+        f"- EER threshold (fake logit): {pooled.get('eer_threshold_fake_logit')}",
         "",
         "## Confusion matrix",
         "",
@@ -3946,6 +4154,8 @@ def write_test_set_summary(
         "",
         "## Coverage",
         "",
+        f"- Split protocol: {result.get('split_protocol', 'unknown')}",
+        f"- Split SHA-256: `{result.get('split_sha256', 'unknown')}`",
         f"- Requested: {result['n_requested']:,}",
         f"- Evaluated: {result['n_evaluated']:,}",
         f"- Missing (decode failure or absent from stream): "
@@ -4154,7 +4364,12 @@ def run_step6_resilient(
         repo_dir = REPO_ROOT
 
     # --- 3. Status ----------------------------------------------------------
-    status = print_status_report(cache_dir, checkpoint_dir, config)
+    status = print_status_report(
+        cache_dir,
+        checkpoint_dir,
+        config,
+        split_file=step6_kwargs.get("split_file", SPLIT_FILE),
+    )
     if status_only:
         return {"status": status, "workdir": workdir}
 
@@ -4179,12 +4394,7 @@ def run_step6_resilient(
     print(f"Validation EER : {summary['val_eer'] * 100:.2f}%")
     print(f"ECE            : {summary['ece_before']:.4f} -> {summary['ece_after']:.4f}")
     print(f"Results file   : {results_path}")
-    print("\nNext action — commit:")
-    print(f"  cd {repo_dir}")
-    print("  git add docs/STEP6_RESULTS.md")
-    print(f'  git commit -m "Step 6: validation EER '
-          f'{summary["val_eer"] * 100:.2f}%"')
-    print("  git push origin main")
+    print("\nReview the split audit, metrics, and generated files before committing.")
     print("=" * 64 + "\n")
 
     summary["results_path"] = results_path

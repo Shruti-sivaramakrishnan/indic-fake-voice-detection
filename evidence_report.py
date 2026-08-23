@@ -1,292 +1,276 @@
+"""Generate the user-downloadable Voice Guard automated analysis report."""
 
-from io import BytesIO
+from __future__ import annotations
+
 from datetime import datetime
+from html import escape
+from io import BytesIO
+from typing import Any
 
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER
 from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
+from reportlab.pdfgen.canvas import Canvas
 from reportlab.platypus import (
-    SimpleDocTemplate,
+    HRFlowable,
+    KeepTogether,
     Paragraph,
+    SimpleDocTemplate,
     Spacer,
     Table,
     TableStyle,
-    HRFlowable,
 )
 
 
-def generate_evidence_report(result, filename="uploaded_audio"):
-    buffer = BytesIO()
+INK = colors.HexColor("#1A1A1A")
+YELLOW = colors.HexColor("#FFD93D")
+CREAM = colors.HexColor("#FFFDF5")
+MUTED = colors.HexColor("#6B6350")
+BORDER = colors.HexColor("#CBD5E1")
+AMBER_BG = colors.HexColor("#FFF3D6")
+AMBER_TEXT = colors.HexColor("#5A3400")
 
+
+def _safe(value: Any) -> str:
+    return escape(str(value), quote=True)
+
+
+def _hash_for_wrapping(value: str) -> str:
+    safe = _safe(value)
+    return " ".join(safe[index : index + 16] for index in range(0, len(safe), 16))
+
+
+def _footer(canvas: Canvas, doc: SimpleDocTemplate) -> None:
+    canvas.saveState()
+    canvas.setStrokeColor(YELLOW)
+    canvas.line(18 * mm, 13 * mm, A4[0] - 18 * mm, 13 * mm)
+    canvas.setFillColor(MUTED)
+    canvas.setFont("Helvetica", 8)
+    canvas.drawString(18 * mm, 8.5 * mm, "Voice Guard - automated model analysis")
+    canvas.drawRightString(
+        A4[0] - 18 * mm,
+        8.5 * mm,
+        f"Page {canvas.getPageNumber()}",
+    )
+    canvas.restoreState()
+
+
+def generate_analysis_report(result: Any, filename: str = "uploaded_audio") -> bytes:
+    """Return a polished PDF record without representing the result as proof."""
+    buffer = BytesIO()
     doc = SimpleDocTemplate(
         buffer,
         pagesize=A4,
         rightMargin=18 * mm,
         leftMargin=18 * mm,
-        topMargin=18 * mm,
-        bottomMargin=18 * mm,
-        title="AI Voice Detection Evidence Report",
+        topMargin=14 * mm,
+        bottomMargin=19 * mm,
+        title="Voice Guard Automated Analysis Report",
         author="Voice Guard",
+        subject="Automated AI voice model output and limitations",
     )
 
     styles = getSampleStyleSheet()
-
     title_style = ParagraphStyle(
         "ReportTitle",
         parent=styles["Title"],
         alignment=TA_CENTER,
-        fontSize=20,
-        leading=24,
-        spaceAfter=8,
+        fontName="Helvetica-Bold",
+        fontSize=18,
+        leading=21,
+        textColor=INK,
+        spaceAfter=5,
     )
-
     subtitle_style = ParagraphStyle(
         "Subtitle",
         parent=styles["Normal"],
         alignment=TA_CENTER,
         fontSize=9,
-        textColor=colors.grey,
-        spaceAfter=18,
+        leading=12,
+        textColor=MUTED,
+        spaceAfter=8,
     )
-
     heading_style = ParagraphStyle(
         "SectionHeading",
         parent=styles["Heading2"],
-        fontSize=13,
-        leading=16,
-        spaceBefore=12,
-        spaceAfter=8,
+        fontName="Helvetica-Bold",
+        fontSize=12,
+        leading=15,
+        textColor=INK,
+        spaceBefore=6,
+        spaceAfter=4,
+        keepWithNext=True,
     )
-
     body_style = ParagraphStyle(
         "Body",
         parent=styles["BodyText"],
-        fontSize=9.5,
-        leading=14,
+        fontSize=9.3,
+        leading=13.5,
+        textColor=INK,
+    )
+    small_style = ParagraphStyle(
+        "Small",
+        parent=body_style,
+        fontSize=7.8,
+        leading=9.6,
+        wordWrap="CJK",
+    )
+    warning_style = ParagraphStyle(
+        "Warning",
+        parent=body_style,
+        fontName="Helvetica-Bold",
+        textColor=AMBER_TEXT,
     )
 
-    story = []
+    def cell(value: Any, style: ParagraphStyle = small_style) -> Paragraph:
+        return Paragraph(_safe(value), style)
 
-    story.append(
-        Paragraph(
-            "AI Voice Detection<br/>Evidence Report",
-            title_style,
+    def key_value_table(rows: list[tuple[Any, Any]], widths=(52 * mm, 115 * mm)) -> Table:
+        data = [[cell(key), cell(value)] for key, value in rows]
+        table = Table(data, colWidths=list(widths), hAlign="LEFT")
+        table.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (0, -1), CREAM),
+                    ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+                    ("GRID", (0, 0), (-1, -1), 0.5, BORDER),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 7),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 7),
+                    ("TOPPADDING", (0, 0), (-1, -1), 3.5),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 3.5),
+                ]
+            )
         )
-    )
+        return table
 
-    generated_at = datetime.now().astimezone().strftime(
-        "%Y-%m-%d %H:%M:%S %Z"
-    )
-
-    story.append(
-        Paragraph(
-            "Automated analysis report generated from the live model prediction",
-            subtitle_style,
-        )
-    )
-
-    story.append(HRFlowable(width="100%", thickness=1))
-    story.append(Spacer(1, 8))
-
-    # Report information
-    story.append(Paragraph("Report Information", heading_style))
-
-    report_data = [
-        ["Generated", generated_at],
-        ["Audio file", filename],
-    ]
-
-    table = Table(
-        report_data,
-        colWidths=[42 * mm, 125 * mm],
-    )
-
-    table.setStyle(
-        TableStyle([
-            ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
-            ("FONTNAME", (1, 0), (1, -1), "Helvetica"),
-            ("FONTSIZE", (0, 0), (-1, -1), 9),
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
-        ])
-    )
-
-    story.append(table)
-
-    # Detection result
-    story.append(Paragraph("Detection Result", heading_style))
-
-    confidence = f"{result.confidence * 100:.2f}%"
-
-    detection_data = [
-        ["Verdict", str(result.verdict).upper()],
-        ["Confidence", confidence],
-        ["Raw model score", f"{result.raw_score:.6f}"],
-    ]
-
-    table = Table(
-        detection_data,
-        colWidths=[55 * mm, 112 * mm],
-    )
-
-    table.setStyle(
-        TableStyle([
-            ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#F1F5F9")),
-            ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
-            ("FONTNAME", (1, 0), (1, -1), "Helvetica"),
-            ("FONTSIZE", (0, 0), (-1, -1), 10),
-            ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
-            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ("TOPPADDING", (0, 0), (-1, -1), 7),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
-        ])
-    )
-
-    story.append(table)
-
-    # Language
-    story.append(Paragraph("Language Information", heading_style))
-
-    detected_language = result.detected_language or "unknown"
-
-    language_eer = (
-        f"{result.language_eer * 100:.2f}%"
-        if result.language_eer is not None
-        else "N/A"
-    )
-
-    language_data = [
-        ["Detected language", detected_language],
-        ["Language EER", language_eer],
-    ]
-
-    table = Table(
-        language_data,
-        colWidths=[55 * mm, 112 * mm],
-    )
-
-    table.setStyle(
-        TableStyle([
-            ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
-            ("FONTNAME", (1, 0), (1, -1), "Helvetica"),
-            ("FONTSIZE", (0, 0), (-1, -1), 9),
-            ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
-            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ("TOPPADDING", (0, 0), (-1, -1), 6),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
-        ])
-    )
-
-    story.append(table)
-
-    # Audio evidence
-    story.append(Paragraph("Audio Evidence", heading_style))
-
-    audio_hash = result.audio_hash or "N/A"
     metadata = result.metadata or {}
-
-    duration = metadata.get("duration_seconds", "N/A")
-    sample_rate = metadata.get("sample_rate_in", "N/A")
-
-    audio_data = [
-        ["SHA-256", audio_hash],
-        ["Duration", f"{duration} seconds"],
-        ["Input sample rate", f"{sample_rate} Hz"],
-    ]
-
-    table = Table(
-        audio_data,
-        colWidths=[55 * mm, 112 * mm],
-    )
-
-    table.setStyle(
-        TableStyle([
-            ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
-            ("FONTNAME", (1, 0), (1, -1), "Helvetica"),
-            ("FONTSIZE", (0, 0), (-1, -1), 8.5),
-            ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("TOPPADDING", (0, 0), (-1, -1), 6),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
-        ])
-    )
-
-    story.append(table)
-
-    # Model information
-    story.append(Paragraph("Model Information", heading_style))
-
-    frontend = metadata.get("frontend", "N/A")
-    checkpoint = metadata.get("checkpoint", "N/A")
-    checkpoint_epoch = metadata.get("checkpoint_epoch", "N/A")
-    temperature = metadata.get("temperature", "N/A")
-    calibrated = metadata.get("calibrated", False)
-
-    model_data = [
-        ["Frontend", frontend],
-        ["Checkpoint", checkpoint],
-        ["Checkpoint epoch", str(checkpoint_epoch)],
-        ["Temperature", str(temperature)],
-        ["Calibrated", "Yes" if calibrated else "No"],
-    ]
-
-    table = Table(
-        model_data,
-        colWidths=[55 * mm, 112 * mm],
-    )
-
-    table.setStyle(
-        TableStyle([
-            ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
-            ("FONTNAME", (1, 0), (1, -1), "Helvetica"),
-            ("FONTSIZE", (0, 0), (-1, -1), 8.5),
-            ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("TOPPADDING", (0, 0), (-1, -1), 6),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
-        ])
-    )
-
-    story.append(table)
-
-    # Interpretation
-    story.append(Paragraph("Interpretation", heading_style))
-
+    p_fake = float(metadata.get("p_fake_calibrated", 0.5))
     verdict = str(result.verdict).lower()
+    verdict_label = {
+        "real": "LIKELY GENUINE",
+        "fake": "LIKELY SYNTHETIC",
+        "uncertain": "INCONCLUSIVE",
+    }.get(verdict, "UNRECOGNIZED")
+    interpretation = {
+        "real": "The clip is more consistent with genuine speech in this model's learned patterns.",
+        "fake": "The clip is more consistent with synthetic speech in this model's learned patterns.",
+        "uncertain": "The model abstained because its score falls inside the inconclusive band.",
+    }.get(verdict, "The model did not return a recognized result.")
 
-    if verdict == "fake":
-        interpretation = (
-            "The model classified the submitted audio as synthetic "
-            "or potentially AI-generated speech."
+    generated_at = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+    story: list[Any] = [
+        Paragraph("Voice Guard<br/>Automated Analysis Report", title_style),
+        Paragraph(
+            "A record of one model run. This document is not forensic evidence.",
+            subtitle_style,
+        ),
+        HRFlowable(width="100%", thickness=1.2, color=YELLOW),
+        Spacer(1, 7),
+        Paragraph("Analysis summary", heading_style),
+    ]
+
+    summary_table = Table(
+        [
+            [Paragraph("RESULT", small_style), Paragraph("AI-LIKELIHOOD MODEL SCORE", small_style)],
+            [Paragraph(verdict_label, warning_style), Paragraph(f"{p_fake * 100:.1f}%", warning_style)],
+        ],
+        colWidths=[83.5 * mm, 83.5 * mm],
+    )
+    summary_table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, -1), AMBER_BG),
+                ("BOX", (0, 0), (-1, -1), 1, YELLOW),
+                ("INNERGRID", (0, 0), (-1, -1), 0.5, YELLOW),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("TOPPADDING", (0, 0), (-1, -1), 5),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                ("LEFTPADDING", (0, 0), (-1, -1), 8),
+            ]
         )
-    elif verdict == "real":
-        interpretation = (
-            "The model classified the submitted audio as bonafide "
-            "or genuine speech."
-        )
-    else:
-        interpretation = (
-            "The model could not make a definitive fake/bonafide "
-            "classification for this audio."
-        )
-
-    story.append(Paragraph(interpretation, body_style))
-
-    # Disclaimer
-    story.append(Paragraph("Important Disclaimer", heading_style))
-
-    disclaimer = (
-        "This report represents an automated model prediction and "
-        "should not be treated as definitive proof of authenticity "
-        "or deception. The result should be interpreted together "
-        "with the confidence and technical evidence provided in "
-        "this report."
+    )
+    story.extend(
+        [
+            summary_table,
+            Spacer(1, 4),
+            Paragraph(interpretation, body_style),
+            Paragraph("Input record", heading_style),
+            key_value_table(
+                [
+                    ("Generated", generated_at),
+                    ("Audio file", filename),
+                    ("Duration", f"{metadata.get('duration_seconds', 'N/A')} seconds"),
+                    ("Input sample rate", f"{metadata.get('sample_rate_in', 'N/A')} Hz"),
+                    ("SHA-256", _hash_for_wrapping(result.audio_hash or "N/A")),
+                ]
+            ),
+            Paragraph("Model record", heading_style),
+            key_value_table(
+                [
+                    ("Frontend", metadata.get("frontend", "N/A")),
+                    ("Checkpoint", metadata.get("checkpoint", "N/A")),
+                    ("Checkpoint epoch", metadata.get("checkpoint_epoch", "N/A")),
+                    ("Temperature scaling", metadata.get("temperature", "N/A")),
+                    ("Decision policy", metadata.get("decision_policy_id", "N/A")),
+                    ("Raw fake logit", f"{result.raw_score:.6f}"),
+                ]
+            ),
+        ]
     )
 
-    story.append(Paragraph(disclaimer, body_style))
+    quality = metadata.get("audio_quality", {})
+    if quality:
+        story.extend(
+            [
+                Paragraph("Input quality checks", heading_style),
+                key_value_table(
+                    [
+                        ("Estimated active speech", f"{quality.get('active_speech_seconds_estimate', 'N/A')} seconds"),
+                        ("Signal RMS", f"{float(quality.get('rms', 0.0)):.6f}"),
+                        ("Peak amplitude", f"{float(quality.get('peak', 0.0)):.6f}"),
+                        ("Quality warning", quality.get("quality_warning") or "None detected"),
+                    ]
+                ),
+            ]
+        )
 
-    doc.build(story)
+    story.append(
+        KeepTogether(
+            [
+                Paragraph("Safety guidance and limitations", heading_style),
+                Table(
+                    [
+                        [
+                            Paragraph(
+                                "If this recording asks for money, a code, or urgent help, contact the person using a number you already know before acting.<br/><br/>"
+                                "Automated analysis can be wrong, especially with noise, compression, unseen generators, very short speech, or playback recordings. The score is a temperature-scaled model output, not a guaranteed real-world probability. This report is not proof of authenticity, identity, intent, or deception.",
+                                warning_style,
+                            )
+                        ]
+                    ],
+                    colWidths=[167 * mm],
+                    style=TableStyle(
+                        [
+                            ("BACKGROUND", (0, 0), (-1, -1), AMBER_BG),
+                            ("BOX", (0, 0), (-1, -1), 1, colors.HexColor("#B85C00")),
+                            ("LEFTPADDING", (0, 0), (-1, -1), 9),
+                            ("RIGHTPADDING", (0, 0), (-1, -1), 9),
+                            ("TOPPADDING", (0, 0), (-1, -1), 8),
+                            ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+                        ]
+                    ),
+                ),
+            ]
+        )
+    )
 
+    doc.build(story, onFirstPage=_footer, onLaterPages=_footer)
     return buffer.getvalue()
+
+
+def generate_evidence_report(result: Any, filename: str = "uploaded_audio") -> bytes:
+    """Backward-compatible alias; new code should use generate_analysis_report."""
+    return generate_analysis_report(result, filename)
