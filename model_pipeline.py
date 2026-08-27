@@ -489,11 +489,11 @@ def load_frontend(
         return _FRONTEND_CACHE[cache_key]
 
     feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(model_name)
-    frontend = Wav2Vec2Model.from_pretrained(model_name)
+    frontend = Wav2Vec2Model.from_pretrained(model_name)  #"Load an already-trained version of this model."
 
-    for param in frontend.parameters():
+    for param in frontend.parameters(): #Go through all the parameters of wav2vec2 and don't calculate/update gradients for them.
         param.requires_grad = False
-    frontend.eval()
+    frontend.eval()  #puts wav2vec2 into evaluation mode.
     frontend = frontend.to(device)
     _FRONTEND_CACHE[cache_key] = (feature_extractor, frontend)
 
