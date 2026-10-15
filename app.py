@@ -20,6 +20,7 @@ except ImportError:
 
 import streamlit as st
 
+import codec_robustness
 import evidence_report
 import i18n
 import ui_kit
@@ -52,6 +53,9 @@ for key, default in {
     "result_hash": None,
     "result_error": None,
     "audio_filename": None,
+    "robustness_report": None,
+    "robustness_hash": None,
+    "robustness_error": None,
 }.items():
     st.session_state.setdefault(key, default)
 
@@ -76,6 +80,9 @@ def clear_analysis_result() -> None:
     st.session_state.result_hash = None
     st.session_state.result_error = None
     st.session_state.audio_filename = None
+    st.session_state.robustness_report = None
+    st.session_state.robustness_hash = None
+    st.session_state.robustness_error = None
 
 
 def sync_selected_upload(audio_bytes: bytes | None) -> str | None:
@@ -92,7 +99,19 @@ def run_analysis(audio_bytes: bytes):
     return mp.analyze_bytes(audio_bytes)
 
 
+def run_robustness_analysis(audio_bytes: bytes, original_result):
+    if MODEL_IMPORT_ERROR is not None or mp is None:
+        raise RuntimeError("model_unavailable")
+    return codec_robustness.analyze_codec_robustness(
+        audio_bytes,
+        mp.analyze_bytes,
+        original_result=original_result,
+    )
+
+
 def safe_error_message(exc: Exception, lang: str) -> str:
+    if isinstance(exc, codec_robustness.CodecRobustnessError):
+        return str(exc)
     if mp is not None and isinstance(exc, mp.AudioValidationError):
         return str(exc)
     if isinstance(exc, ValueError) and str(exc).startswith("Unsupported language hint"):
@@ -272,6 +291,68 @@ def render_result(result, lang: str) -> None:
             st.warning(t("quality_warning_clipping", lang))
 
 
+def render_robustness_report(report, lang: str) -> None:
+    """Render a compact original-versus-channel comparison."""
+    rows = []
+    for condition in report.conditions:
+        if condition.succeeded:
+            delta = condition.delta_p_fake or 0.0
+            rows.append(
+                {
+                    t("robustness_condition", lang): condition.label,
+                    t("robustness_score", lang): f"{condition.p_fake * 100:.1f}%",
+                    t("robustness_change", lang): (
+                        "—" if condition.condition_id == "original"
+                        else f"{delta * 100:+.1f} pp"
+                    ),
+                    t("robustness_verdict", lang): condition.verdict.title(),
+                    t("robustness_stability", lang): (
+                        t("robustness_changed", lang)
+                        if condition.verdict_changed
+                        else t("robustness_unchanged", lang)
+                    ),
+                }
+            )
+        else:
+            rows.append(
+                {
+                    t("robustness_condition", lang): condition.label,
+                    t("robustness_score", lang): "—",
+                    t("robustness_change", lang): "—",
+                    t("robustness_verdict", lang): t("robustness_failed", lang),
+                    t("robustness_stability", lang): "—",
+                }
+            )
+
+    panel = st.container(border=True)
+    with panel:
+        st.markdown(f"### {t('robustness_title', lang)}")
+        st.caption(t("robustness_body", lang))
+        st.dataframe(rows, hide_index=True, use_container_width=True)
+
+        if report.transformed_success_count == 0:
+            st.warning(t("robustness_no_comparisons", lang))
+        elif report.verdict_change_count:
+            st.warning(
+                t("robustness_summary_changed", lang).format(
+                    count=report.verdict_change_count,
+                    total=report.transformed_success_count,
+                )
+            )
+        else:
+            st.success(t("robustness_summary_stable", lang))
+
+        st.caption(
+            t("robustness_max_change", lang).format(
+                value=report.max_absolute_delta * 100
+            )
+        )
+        if report.failed_conditions:
+            failed = ", ".join(condition.label for condition in report.failed_conditions)
+            st.warning(t("robustness_partial_failure", lang).format(conditions=failed))
+        st.caption(t("robustness_limit", lang))
+
+
 def render_report_download(result, filename: str, lang: str) -> None:
     try:
         report_pdf = evidence_report.generate_analysis_report(result, filename)
@@ -347,6 +428,9 @@ def render_app() -> None:
 
             if analyze and audio_bytes is not None:
                 st.session_state.result_error = None
+                st.session_state.robustness_report = None
+                st.session_state.robustness_hash = None
+                st.session_state.robustness_error = None
                 with st.spinner(t("analyzing_status", lang)):
                     try:
                         result = run_analysis(audio_bytes)
@@ -378,6 +462,37 @@ def render_app() -> None:
     if result_is_current:
         st.markdown("<div style='height:1.2rem'></div>", unsafe_allow_html=True)
         render_result(st.session_state.result, lang)
+
+        run_robustness = st.button(
+            t("robustness_button", lang),
+            use_container_width=True,
+            key="run_robustness",
+        )
+        if run_robustness and audio_bytes is not None:
+            st.session_state.robustness_error = None
+            with st.spinner(t("robustness_running", lang)):
+                try:
+                    report = run_robustness_analysis(
+                        audio_bytes,
+                        st.session_state.result,
+                    )
+                    st.session_state.robustness_report = report
+                    st.session_state.robustness_hash = selected_hash
+                except Exception as exc:  # noqa: BLE001
+                    LOGGER.exception("Robustness analysis failed", exc_info=exc)
+                    st.session_state.robustness_report = None
+                    st.session_state.robustness_hash = None
+                    st.session_state.robustness_error = safe_error_message(exc, lang)
+
+        robustness_is_current = (
+            st.session_state.robustness_report is not None
+            and st.session_state.robustness_hash == selected_hash
+        )
+        if st.session_state.robustness_error:
+            st.warning(st.session_state.robustness_error)
+        if robustness_is_current:
+            render_robustness_report(st.session_state.robustness_report, lang)
+
         render_report_download(
             st.session_state.result,
             st.session_state.audio_filename or "uploaded_audio",

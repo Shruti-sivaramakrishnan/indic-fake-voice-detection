@@ -386,11 +386,16 @@ def assert_split_coverage(
 
 def open_stream(need_audio: bool = True):
     """Open the HF dataset in streaming mode, dropping audio when not needed."""
-    from datasets import load_dataset
+    from datasets import Audio, load_dataset
 
     ds = load_dataset(HF_DATASET, split="train", streaming=True)
 
-    if not need_audio:
+    if need_audio:
+        # Keep the encoded bytes and decode them with soundfile below.  This
+        # avoids making dataset iteration depend on torchcodec plus a shared
+        # system FFmpeg installation, which is fragile on local machines.
+        ds = ds.cast_column("audio", Audio(decode=False))
+    else:
         # Skips torchcodec decode entirely — use for metadata-only passes.
         ds = ds.remove_columns("audio")
 
@@ -429,14 +434,27 @@ def stream_and_filter_by_ids(
 
 def decode_audio(example: dict) -> Tuple[np.ndarray, int]:
     """
-    The `audio` field is a torchcodec AudioDecoder, not a plain array — it must be
-    read via .get_all_samples(). Returns (waveform, sample_rate).
+    Decode an audio field returned by :func:`open_stream`.
+
+    Current streams expose ``{"bytes", "path"}`` with decoding disabled so
+    training works without torchcodec.  The legacy AudioDecoder path remains
+    supported for callers holding examples created by older datasets versions.
     """
-    audio_decoder = example["audio"]
-    decoded = audio_decoder.get_all_samples()
-    waveform = decoded.data.numpy().squeeze()
-    sr = decoded.sample_rate
-    return waveform, sr
+    audio = example["audio"]
+    if isinstance(audio, dict):
+        encoded = audio.get("bytes")
+        if encoded is not None:
+            return decode_audio_bytes(encoded)
+
+        path = audio.get("path")
+        if path:
+            with open(path, "rb") as handle:
+                return decode_audio_bytes(handle.read())
+
+        raise ValueError("Dataset audio has neither encoded bytes nor a path.")
+
+    decoded = audio.get_all_samples()
+    return decoded.data.numpy().squeeze(), decoded.sample_rate
 
 
 def ensure_target_sample_rate(
@@ -2866,8 +2884,7 @@ def decode_audio_bytes(audio_bytes: bytes) -> Tuple[np.ndarray, int]:
     Decode arbitrary audio bytes (wav/flac/mp3/ogg/m4a) to a mono float32 array.
 
     Tries soundfile, then torchaudio (with ffmpeg backend), then pydub.
-    Deliberately does NOT reuse decode_audio(), which expects a torchcodec
-    AudioDecoder from the HF dataset rather than raw bytes.
+    This is also used by decode_audio() for encoded dataset examples.
     """
     import io
 

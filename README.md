@@ -34,6 +34,21 @@ The demo expects:
 
 Accepted formats are WAV, MP3, FLAC, OGG, and M4A. The public input policy is 25 MB maximum, 1-30 seconds, with at least about half a second of audible speech.
 
+### Transmission robustness comparison
+
+After a normal analysis, the demo can create three in-memory variants of the
+same upload and score them with the same checkpoint:
+
+- Opus at 16 kbps in VoIP mode;
+- G.711 A-law at 8 kHz with telephone-band filtering; and
+- 8 kHz telephone-band linear PCM.
+
+The comparison reports each AI-likelihood score, its change from the original,
+and whether the verdict changed. FFmpeg must be installed and available on
+`PATH`; transformed audio is not saved to disk. This is a diagnostic of the
+current model under simulated transmission conditions, not evidence that the
+model has been retrained or proven codec-robust.
+
 ## Test the dependency-light safety layer
 
 ```bash
@@ -98,6 +113,7 @@ The notebook reads the token from Kaggle Secrets and never prints it. Do not pas
 ## Repository map
 
 - `app.py` - Streamlit interaction and result state
+- `codec_robustness.py` - in-memory FFmpeg channel simulations and score comparison
 - `voice_guard_core.py` - dependency-light input and decision policies
 - `model_pipeline.py` - frontend, heads, training, inference, and evaluation
 - `evidence_report.py` - automated analysis PDF
