@@ -501,6 +501,103 @@ TRANSLATIONS["pdf_body"] = {
     "Kannada": "ಈ ಸ್ವಯಂಚಾಲಿತ ಫಲಿತಾಂಶ, ಇನ್‌ಪುಟ್ hash ಮತ್ತು ಅದರ ಮಿತಿಗಳ ಹಂಚಬಹುದಾದ ದಾಖಲೆಯನ್ನು ಡೌನ್‌ಲೋಡ್ ಮಾಡಿ.",
 }
 
+# Transmission robustness comparison added to the upload workflow. Technical
+# condition names (Opus/G.711/8 kHz) remain standards-based proper names.
+TRANSLATIONS.update({
+    "robustness_title": {
+        "English": "Transmission robustness check",
+        "Hindi": "प्रसारण मजबूती जाँच",
+        "Tamil": "பரிமாற்ற நிலைத்தன்மைச் சோதனை",
+        "Kannada": "ಪ್ರಸರಣ ಸ್ಥಿರತೆ ಪರಿಶೀಲನೆ",
+    },
+    "robustness_body": {
+        "English": "Compare this result after common messaging and telephone transformations.",
+        "Hindi": "सामान्य मैसेजिंग और टेलीफोन बदलावों के बाद इस परिणाम की तुलना करें।",
+        "Tamil": "பொதுவான செய்தியிடல் மற்றும் தொலைபேசி மாற்றங்களுக்குப் பிறகு முடிவை ஒப்பிடுங்கள்.",
+        "Kannada": "ಸಾಮಾನ್ಯ ಮೆಸೇಜಿಂಗ್ ಮತ್ತು ದೂರವಾಣಿ ಬದಲಾವಣೆಗಳ ನಂತರ ಫಲಿತಾಂಶವನ್ನು ಹೋಲಿಸಿ.",
+    },
+    "robustness_button": {
+        "English": "Check transmission robustness",
+        "Hindi": "प्रसारण मजबूती जाँचें",
+        "Tamil": "பரிமாற்ற நிலைத்தன்மையைச் சோதிக்கவும்",
+        "Kannada": "ಪ್ರಸರಣ ಸ್ಥಿರತೆಯನ್ನು ಪರಿಶೀಲಿಸಿ",
+    },
+    "robustness_running": {
+        "English": "Testing common transmission conditions…",
+        "Hindi": "सामान्य प्रसारण स्थितियों की जाँच हो रही है…",
+        "Tamil": "பொதுவான பரிமாற்ற நிலைகள் சோதிக்கப்படுகின்றன…",
+        "Kannada": "ಸಾಮಾನ್ಯ ಪ್ರಸರಣ ಪರಿಸ್ಥಿತಿಗಳನ್ನು ಪರೀಕ್ಷಿಸಲಾಗುತ್ತಿದೆ…",
+    },
+    "robustness_condition": {
+        "English": "Condition", "Hindi": "स्थिति",
+        "Tamil": "நிலை", "Kannada": "ಪರಿಸ್ಥಿತಿ",
+    },
+    "robustness_score": {
+        "English": "AI-likelihood", "Hindi": "एआई-संभावना",
+        "Tamil": "AI சாத்தியம்", "Kannada": "AI ಸಾಧ್ಯತೆ",
+    },
+    "robustness_change": {
+        "English": "Change", "Hindi": "बदलाव",
+        "Tamil": "மாற்றம்", "Kannada": "ಬದಲಾವಣೆ",
+    },
+    "robustness_verdict": {
+        "English": "Result", "Hindi": "परिणाम",
+        "Tamil": "முடிவு", "Kannada": "ಫಲಿತಾಂಶ",
+    },
+    "robustness_stability": {
+        "English": "Stability", "Hindi": "स्थिरता",
+        "Tamil": "நிலைத்தன்மை", "Kannada": "ಸ್ಥಿರತೆ",
+    },
+    "robustness_unchanged": {
+        "English": "Unchanged", "Hindi": "अपरिवर्तित",
+        "Tamil": "மாறவில்லை", "Kannada": "ಬದಲಾಗಿಲ್ಲ",
+    },
+    "robustness_changed": {
+        "English": "Changed", "Hindi": "बदला",
+        "Tamil": "மாறியது", "Kannada": "ಬದಲಾಗಿದೆ",
+    },
+    "robustness_failed": {
+        "English": "Unavailable", "Hindi": "अनुपलब्ध",
+        "Tamil": "கிடைக்கவில்லை", "Kannada": "ಲಭ್ಯವಿಲ್ಲ",
+    },
+    "robustness_summary_stable": {
+        "English": "The verdict stayed the same in every successful condition.",
+        "Hindi": "हर सफल स्थिति में परिणाम समान रहा।",
+        "Tamil": "வெற்றிகரமான எல்லா நிலைகளிலும் முடிவு மாறவில்லை.",
+        "Kannada": "ಯಶಸ್ವಿಯಾದ ಪ್ರತಿಯೊಂದು ಪರಿಸ್ಥಿತಿಯಲ್ಲೂ ಫಲಿತಾಂಶ ಬದಲಾಗಲಿಲ್ಲ.",
+    },
+    "robustness_no_comparisons": {
+        "English": "No transformed condition completed successfully.",
+        "Hindi": "कोई भी बदली हुई स्थिति सफलतापूर्वक पूरी नहीं हुई।",
+        "Tamil": "மாற்றப்பட்ட எந்த நிலையும் வெற்றிகரமாக நிறைவடையவில்லை.",
+        "Kannada": "ಯಾವುದೇ ಬದಲಾಯಿಸಿದ ಪರಿಸ್ಥಿತಿ ಯಶಸ್ವಿಯಾಗಿ ಪೂರ್ಣಗೊಂಡಿಲ್ಲ.",
+    },
+    "robustness_summary_changed": {
+        "English": "The verdict changed in {count} of {total} successful transformed conditions.",
+        "Hindi": "{total} सफल बदली हुई स्थितियों में से {count} में परिणाम बदल गया।",
+        "Tamil": "{total} வெற்றிகரமான மாற்றப்பட்ட நிலைகளில் {count} இல் முடிவு மாறியது.",
+        "Kannada": "{total} ಯಶಸ್ವಿ ಬದಲಾಯಿಸಿದ ಪರಿಸ್ಥಿತಿಗಳಲ್ಲಿ {count}ರಲ್ಲಿ ಫಲಿತಾಂಶ ಬದಲಾಗಿದೆ.",
+    },
+    "robustness_max_change": {
+        "English": "Largest AI-likelihood change from the original: {value:.1f} percentage points.",
+        "Hindi": "मूल ऑडियो से एआई-संभावना में सबसे बड़ा बदलाव: {value:.1f} प्रतिशत अंक।",
+        "Tamil": "அசலிலிருந்து AI சாத்தியத்தின் மிகப்பெரிய மாற்றம்: {value:.1f} சதவீதப் புள்ளிகள்.",
+        "Kannada": "ಮೂಲದಿಂದ AI ಸಾಧ್ಯತೆಯ ಅತಿದೊಡ್ಡ ಬದಲಾವಣೆ: {value:.1f} ಶೇಕಡಾವಾರು ಅಂಕಗಳು.",
+    },
+    "robustness_partial_failure": {
+        "English": "Some conditions could not be tested: {conditions}.",
+        "Hindi": "कुछ स्थितियों की जाँच नहीं हो सकी: {conditions}।",
+        "Tamil": "சில நிலைகளைச் சோதிக்க முடியவில்லை: {conditions}.",
+        "Kannada": "ಕೆಲವು ಪರಿಸ್ಥಿತಿಗಳನ್ನು ಪರೀಕ್ಷಿಸಲಾಗಲಿಲ್ಲ: {conditions}.",
+    },
+    "robustness_limit": {
+        "English": "This compares the current model under simulated channels; it does not prove that the model is codec-robust.",
+        "Hindi": "यह मौजूदा मॉडल की कृत्रिम चैनलों में तुलना है; यह मॉडल के कोडेक-मजबूत होने का प्रमाण नहीं है।",
+        "Tamil": "இது தற்போதைய மாதிரியை உருவகப்படுத்திய சேனல்களில் ஒப்பிடுகிறது; மாதிரி codec-நிலைத்தன்மை கொண்டது என்பதை இது நிரூபிக்காது.",
+        "Kannada": "ಇದು ಪ್ರಸ್ತುತ ಮಾದರಿಯನ್ನು ಅನುಕರಿಸಿದ ಚಾನೆಲ್‌ಗಳಲ್ಲಿ ಹೋಲಿಸುತ್ತದೆ; ಮಾದರಿ codec-ಸ್ಥಿರವಾಗಿದೆ ಎಂದು ಇದು ಸಾಬೀತುಪಡಿಸುವುದಿಲ್ಲ.",
+    },
+})
+
 
 def t(key: str, lang: str) -> str:
     """Look up a translated UI string. Falls back to English, then the raw key,
