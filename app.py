@@ -20,6 +20,7 @@ except ImportError:
 
 import streamlit as st
 
+import call_analysis
 import codec_robustness
 import evidence_report
 import i18n
@@ -56,6 +57,11 @@ for key, default in {
     "robustness_report": None,
     "robustness_hash": None,
     "robustness_error": None,
+    "call_selected_hash": None,
+    "call_result": None,
+    "call_result_hash": None,
+    "call_result_error": None,
+    "call_audio_filename": None,
 }.items():
     st.session_state.setdefault(key, default)
 
@@ -380,10 +386,236 @@ def render_report_download(result, filename: str, lang: str) -> None:
         )
 
 
+def format_call_time(seconds: float) -> str:
+    total_seconds = max(0, int(seconds))
+    minutes, seconds = divmod(total_seconds, 60)
+    return f"{minutes:02d}:{seconds:02d}"
+
+
+def render_call_analysis(lang: str) -> None:
+    import csv
+    import io
+
+    import pandas as pd
+
+    st.markdown(
+        f"""
+        <div class="vg-section-kicker">{html.escape(t("workspace_kicker", lang))}</div>
+        <h2 class="vg-section-title">{html.escape(t("call_analysis_mode", lang))}</h2>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    uploaded = st.file_uploader(
+        t("call_upload_label", lang),
+        type=ACCEPTED_TYPES,
+        help=t("call_upload_help", lang),
+        key="call_audio_upload",
+    )
+
+    audio_bytes = uploaded.getvalue() if uploaded is not None else None
+    selected_hash = (
+        hashlib.sha256(audio_bytes).hexdigest()
+        if audio_bytes is not None
+        else None
+    )
+
+    if selected_hash != st.session_state.call_selected_hash:
+        st.session_state.call_selected_hash = selected_hash
+        st.session_state.call_result = None
+        st.session_state.call_result_hash = None
+        st.session_state.call_result_error = None
+        st.session_state.call_audio_filename = None
+
+    if uploaded is not None and audio_bytes is not None:
+        st.audio(audio_bytes)
+        st.caption(f"{uploaded.name} · {format_bytes(len(audio_bytes))}")
+
+    analyze = st.button(
+        t("call_analyze_button", lang),
+        type="primary",
+        use_container_width=True,
+        disabled=uploaded is None,
+        key="run_call_analysis",
+    )
+
+    if analyze and audio_bytes is not None:
+        st.session_state.call_result = None
+        st.session_state.call_result_hash = None
+        st.session_state.call_result_error = None
+
+        progress_bar = st.progress(0.0)
+        progress_status = st.empty()
+
+        def update_progress(value: float) -> None:
+            value = min(1.0, max(0.0, float(value)))
+            progress_bar.progress(value)
+            progress_status.text(
+                f"{t('call_analyzing', lang)} {value:.0%}"
+            )
+
+        try:
+            with st.spinner(t("call_analyzing", lang)):
+                report = call_analysis.analyze_call(
+                    audio_bytes,
+                    progress_callback=update_progress,
+                )
+
+            st.session_state.call_result = report
+            st.session_state.call_result_hash = selected_hash
+            st.session_state.call_audio_filename = uploaded.name
+            progress_bar.progress(1.0)
+            progress_status.empty()
+
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.exception("Call analysis failed", exc_info=exc)
+            st.session_state.call_result = None
+            st.session_state.call_result_hash = None
+            st.session_state.call_result_error = safe_error_message(
+                exc, lang
+            )
+            progress_status.empty()
+
+    if st.session_state.call_result_error:
+        st.error(st.session_state.call_result_error)
+
+    report = st.session_state.call_result
+    result_is_current = (
+        report is not None
+        and selected_hash is not None
+        and st.session_state.call_result_hash == selected_hash
+    )
+
+    if not result_is_current:
+        return
+
+    st.divider()
+    st.subheader(t("call_summary", lang))
+
+    metric_columns = st.columns(4)
+    metric_columns[0].metric(
+        t("call_speech_duration", lang),
+        format_call_time(report.speech_duration_seconds),
+    )
+    metric_columns[1].metric(
+        t("call_windows", lang),
+        report.windows_analysed,
+    )
+    metric_columns[2].metric(
+        t("call_flagged_share", lang),
+        f"{report.flagged_share:.1%}",
+    )
+    metric_columns[3].metric(
+        t("call_highest_score", lang),
+        f"{report.highest_p_fake:.1%}",
+    )
+
+    st.caption(
+        f"{t('call_highest_time', lang)}: "
+        f"{format_call_time(report.highest_score_timestamp)}"
+    )
+
+    st.divider()
+    st.subheader(t("call_timeline", lang))
+
+    chart_data = pd.DataFrame([
+        {
+            "Time (seconds)": (
+                score.start_seconds + score.end_seconds
+            ) / 2,
+            "AI likelihood": score.p_fake,
+            "Lower threshold (0.35)": 0.35,
+            "Upper threshold (0.65)": 0.65,
+        }
+        for score in report.window_scores
+    ]).set_index("Time (seconds)")
+
+    st.line_chart(chart_data)
+    st.caption(t("call_limit_note", lang))
+
+    st.divider()
+    st.subheader(t("call_flagged_ranges", lang))
+
+    if report.flagged_ranges:
+        flagged_data = [
+            {
+                t("call_start", lang): format_call_time(region.start_seconds),
+                t("call_end", lang): format_call_time(region.end_seconds),
+            }
+            for region in report.flagged_ranges
+        ]
+        st.dataframe(
+            flagged_data,
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.info(t("call_no_flagged", lang))
+
+    csv_buffer = io.StringIO()
+    writer = csv.DictWriter(
+        csv_buffer,
+        fieldnames=[
+            "start_seconds",
+            "end_seconds",
+            "raw_logit",
+            "p_fake",
+            "verdict",
+        ],
+    )
+    writer.writeheader()
+
+    for score in report.window_scores:
+        writer.writerow({
+            "start_seconds": score.start_seconds,
+            "end_seconds": score.end_seconds,
+            "raw_logit": score.raw_logit,
+            "p_fake": score.p_fake,
+            "verdict": score.verdict,
+        })
+
+    safe_stem = Path(
+        st.session_state.call_audio_filename or "call_recording"
+    ).stem
+
+    st.download_button(
+        label=t("call_csv_button", lang),
+        data=csv_buffer.getvalue(),
+        file_name=f"{safe_stem}_call_analysis.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+
+
 def render_app() -> None:
     lang = current_lang()
     render_header(lang)
     render_hero(lang)
+
+    mode = st.radio(
+        t("mode_label", lang),
+        options=["single", "call"],
+        format_func=lambda value: (
+            t("single_clip_mode", lang)
+            if value == "single"
+            else t("call_analysis_mode", lang)
+        ),
+        horizontal=True,
+        key="analysis_mode",
+    )
+
+    if mode == "call":
+        render_call_analysis(lang)
+        st.markdown(
+            f"""
+            <footer class="vg-footer">
+              <strong>{html.escape(t('footer_product', lang))}</strong>
+              <span>{html.escape(t('privacy_note', lang))}</span>
+            </footer>
+            """,
+            unsafe_allow_html=True,
+        )
+        return
 
     upload_col, process_col = st.columns([1.55, 0.85], gap="large")
     with upload_col:

@@ -599,6 +599,112 @@ TRANSLATIONS.update({
 })
 
 
+
+# Long-call analysis interface translations.
+TRANSLATIONS.update({
+    "mode_label": {
+        "English": "Analysis Mode", "Hindi": "विश्लेषण मोड",
+        "Tamil": "பகுப்பாய்வு முறை", "Kannada": "ವಿಶ್ಲೇಷಣಾ ವಿಧಾನ",
+    },
+    "single_clip_mode": {
+        "English": "Single Clip", "Hindi": "एकल क्लिप",
+        "Tamil": "ஒற்றை ஒலி", "Kannada": "ಒಂದು ಆಡಿಯೊ ಕ್ಲಿಪ್",
+    },
+    "call_analysis_mode": {
+        "English": "Call Analysis", "Hindi": "कॉल विश्लेषण",
+        "Tamil": "அழைப்பு பகுப்பாய்வு", "Kannada": "ಕರೆ ವಿಶ್ಲೇಷಣೆ",
+    },
+    "call_upload_label": {
+        "English": "Upload a phone-call recording",
+        "Hindi": "फ़ोन कॉल की रिकॉर्डिंग अपलोड करें",
+        "Tamil": "தொலைபேசி அழைப்புப் பதிவேற்றம்",
+        "Kannada": "ದೂರವಾಣಿ ಕರೆಯ ಧ್ವನಿಮುದ್ರಿಕೆಯನ್ನು ಅಪ್‌ಲೋಡ್ ಮಾಡಿ",
+    },
+    "call_upload_help": {
+        "English": "WAV, MP3, FLAC, OGG or M4A. Long-call analysis supports recordings up to 15 minutes.",
+        "Hindi": "WAV, MP3, FLAC, OGG या M4A। अधिकतम 15 मिनट की रिकॉर्डिंग।",
+        "Tamil": "WAV, MP3, FLAC, OGG அல்லது M4A. அதிகபட்சம் 15 நிமிடப் பதிவு.",
+        "Kannada": "WAV, MP3, FLAC, OGG ಅಥವಾ M4A. ಗರಿಷ್ಠ 15 ನಿಮಿಷಗಳ ಧ್ವನಿಮುದ್ರಿಕೆ.",
+    },
+    "call_analyze_button": {
+        "English": "Analyze Call", "Hindi": "कॉल का विश्लेषण करें",
+        "Tamil": "அழைப்பைப் பகுப்பாய்வு செய்", "Kannada": "ಕರೆಯನ್ನು ವಿಶ್ಲೇಷಿಸಿ",
+    },
+    "call_analyzing": {
+        "English": "Analyzing call...", "Hindi": "कॉल का विश्लेषण हो रहा है...",
+        "Tamil": "அழைப்பு பகுப்பாய்வு செய்யப்படுகிறது...",
+        "Kannada": "ಕರೆಯನ್ನು ವಿಶ್ಲೇಷಿಸಲಾಗುತ್ತಿದೆ...",
+    },
+    "call_progress": {
+        "English": "Analysis progress", "Hindi": "विश्लेषण की प्रगति",
+        "Tamil": "பகுப்பாய்வு முன்னேற்றம்", "Kannada": "ವಿಶ್ಲೇಷಣೆಯ ಪ್ರಗತಿ",
+    },
+    "call_summary": {
+        "English": "Call Analysis Summary", "Hindi": "कॉल विश्लेषण सारांश",
+        "Tamil": "அழைப்புப் பகுப்பாய்வு சுருக்கம்",
+        "Kannada": "ಕರೆ ವಿಶ್ಲೇಷಣೆಯ ಸಾರಾಂಶ",
+    },
+    "call_speech_duration": {
+        "English": "Speech-active duration", "Hindi": "सक्रिय भाषण अवधि",
+        "Tamil": "பேச்சு செயல்பாட்டு நேரம்", "Kannada": "ಮಾತಿನ ಸಕ್ರಿಯ ಅವಧಿ",
+    },
+    "call_windows": {
+        "English": "Windows analyzed", "Hindi": "विश्लेषित विंडो",
+        "Tamil": "பகுப்பாய்வு செய்யப்பட்ட பகுதிகள்",
+        "Kannada": "ವಿಶ್ಲೇಷಿಸಿದ ವಿಭಾಗಗಳು",
+    },
+    "call_flagged_share": {
+        "English": "Flagged share", "Hindi": "चिह्नित हिस्सा",
+        "Tamil": "குறிக்கப்பட்ட பங்கு", "Kannada": "ಗುರುತಿಸಲಾದ ಪಾಲು",
+    },
+    "call_highest_score": {
+        "English": "Highest AI likelihood", "Hindi": "सबसे अधिक AI संभावना",
+        "Tamil": "அதிகபட்ச AI சாத்தியம்", "Kannada": "ಅತಿ ಹೆಚ್ಚು AI ಸಾಧ್ಯತೆ",
+    },
+    "call_highest_time": {
+        "English": "Highest score timestamp", "Hindi": "उच्चतम स्कोर का समय",
+        "Tamil": "அதிகபட்ச மதிப்பெண் நேரம்",
+        "Kannada": "ಅತ್ಯಧಿಕ ಅಂಕದ ಸಮಯ",
+    },
+    "call_timeline": {
+        "English": "AI Likelihood Timeline", "Hindi": "AI संभावना समयरेखा",
+        "Tamil": "AI சாத்தியக்கூறு காலவரிசை",
+        "Kannada": "AI ಸಾಧ್ಯತೆಯ ಕಾಲರೇಖೆ",
+    },
+    "call_flagged_ranges": {
+        "English": "Flagged Time Ranges", "Hindi": "चिह्नित समय सीमाएँ",
+        "Tamil": "குறிக்கப்பட்ட நேர இடைவெளிகள்",
+        "Kannada": "ಗುರುತಿಸಲಾದ ಸಮಯದ ವ್ಯಾಪ್ತಿಗಳು",
+    },
+    "call_start": {
+        "English": "Start", "Hindi": "प्रारंभ",
+        "Tamil": "தொடக்கம்", "Kannada": "ಪ್ರಾರಂಭ",
+    },
+    "call_end": {
+        "English": "End", "Hindi": "समाप्ति",
+        "Tamil": "முடிவு", "Kannada": "ಅಂತ್ಯ",
+    },
+    "call_csv_button": {
+        "English": "Download Window Results (CSV)",
+        "Hindi": "विंडो परिणाम डाउनलोड करें (CSV)",
+        "Tamil": "பகுதி முடிவுகளைப் பதிவிறக்கு (CSV)",
+        "Kannada": "ವಿಭಾಗದ ಫಲಿತಾಂಶಗಳನ್ನು ಡೌನ್‌ಲೋಡ್ ಮಾಡಿ (CSV)",
+    },
+    "call_no_flagged": {
+        "English": "No windows were classified as fake.",
+        "Hindi": "किसी भी विंडो को नकली के रूप में वर्गीकृत नहीं किया गया।",
+        "Tamil": "எந்தப் பகுதியும் போலியானது என வகைப்படுத்தப்படவில்லை.",
+        "Kannada": "ಯಾವುದೇ ವಿಭಾಗವನ್ನು ನಕಲಿ ಎಂದು ವರ್ಗೀಕರಿಸಲಾಗಿಲ್ಲ.",
+    },
+    "call_limit_note": {
+        "English": "The speech regions are estimated using audio energy, not a trained voice activity detector. Thresholds shown are 0.35 and 0.65.",
+        "Hindi": "भाषण क्षेत्रों का अनुमान ऑडियो ऊर्जा से लगाया जाता है, प्रशिक्षित वॉइस एक्टिविटी डिटेक्टर से नहीं। दिखाई गई सीमाएँ 0.35 और 0.65 हैं।",
+        "Tamil": "பயிற்சி பெற்ற குரல் செயல்பாட்டுக் கண்டறிவி அல்ல, ஒலி ஆற்றலைப் பயன்படுத்தியே பேச்சுப் பகுதிகள் கணிக்கப்படுகின்றன. காட்டப்படும் வரம்புகள் 0.35 மற்றும் 0.65.",
+        "Kannada": "ತರಬೇತಿ ಪಡೆದ ಧ್ವನಿ ಚಟುವಟಿಕೆ ಪತ್ತೆಕಾರಕದ ಬದಲಿಗೆ ಆಡಿಯೊ ಶಕ್ತಿಯಿಂದ ಮಾತಿನ ಪ್ರದೇಶಗಳನ್ನು ಅಂದಾಜಿಸಲಾಗುತ್ತದೆ. ತೋರಿಸಿರುವ ಮಿತಿಗಳು 0.35 ಮತ್ತು 0.65.",
+    },
+})
+
+
 def t(key: str, lang: str) -> str:
     """Look up a translated UI string. Falls back to English, then the raw key,
     so a missing translation degrades to readable text instead of a crash."""
