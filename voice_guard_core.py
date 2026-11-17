@@ -51,6 +51,15 @@ class AudioInputPolicy:
 
 
 @dataclass(frozen=True)
+class CallInputPolicy:
+    """Input limits for long phone-call recordings."""
+
+    max_bytes: int = 200 * 1024 * 1024
+    min_duration_seconds: float = 1.0
+    max_duration_seconds: float = 900.0
+
+
+@dataclass(frozen=True)
 class DecisionPolicy:
     """Three-way abstention policy operating on calibrated P(fake)."""
 
