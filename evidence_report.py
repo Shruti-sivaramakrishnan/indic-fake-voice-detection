@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from html import escape
 from io import BytesIO
+from pathlib import Path
 from typing import Any
 
 from reportlab.lib import colors
@@ -274,3 +275,211 @@ def generate_analysis_report(result: Any, filename: str = "uploaded_audio") -> b
 def generate_evidence_report(result: Any, filename: str = "uploaded_audio") -> bytes:
     """Backward-compatible alias; new code should use generate_analysis_report."""
     return generate_analysis_report(result, filename)
+
+
+def generate_call_analysis_report(report: Any, filename: str = "call_recording") -> bytes:
+    """Create a PDF report for a full phone-call analysis."""
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        rightMargin=18 * mm,
+        leftMargin=18 * mm,
+        topMargin=14 * mm,
+        bottomMargin=19 * mm,
+        title="Voice Guard Call Analysis Report",
+        author="Voice Guard",
+        subject="Automated call-level AI voice analysis",
+    )
+
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "CallReportTitle",
+        parent=styles["Title"],
+        alignment=TA_CENTER,
+        fontName="Helvetica-Bold",
+        fontSize=18,
+        leading=21,
+        textColor=INK,
+        spaceAfter=5,
+    )
+    subtitle_style = ParagraphStyle(
+        "CallReportSubtitle",
+        parent=styles["Normal"],
+        alignment=TA_CENTER,
+        fontSize=9,
+        leading=12,
+        textColor=MUTED,
+        spaceAfter=10,
+    )
+    heading_style = ParagraphStyle(
+        "CallReportHeading",
+        parent=styles["Heading2"],
+        fontName="Helvetica-Bold",
+        fontSize=12,
+        leading=15,
+        textColor=INK,
+        spaceBefore=9,
+        spaceAfter=5,
+        keepWithNext=True,
+    )
+    body_style = ParagraphStyle(
+        "CallReportBody",
+        parent=styles["BodyText"],
+        fontSize=9,
+        leading=13,
+        textColor=INK,
+    )
+    small_style = ParagraphStyle(
+        "CallReportSmall",
+        parent=body_style,
+        fontSize=7.5,
+        leading=9.5,
+        wordWrap="CJK",
+    )
+    warning_style = ParagraphStyle(
+        "CallReportWarning",
+        parent=body_style,
+        fontName="Helvetica-Bold",
+        textColor=AMBER_TEXT,
+    )
+
+    def seconds(value: float) -> str:
+        total = max(0, int(value))
+        return f"{total // 60:02d}:{total % 60:02d}"
+
+    def make_cell(value: Any, style=small_style) -> Paragraph:
+        return Paragraph(_safe(value), style)
+
+    story = [
+        Paragraph("Voice Guard", title_style),
+        Paragraph("Phone Call Analysis Report", subtitle_style),
+        HRFlowable(width="100%", thickness=1, color=YELLOW),
+        Spacer(1, 8),
+        Paragraph("Recording summary", heading_style),
+    ]
+
+    summary_rows = [
+        ("Audio file", Path(filename).name),
+        ("Recording duration", f"{report.duration_seconds:.2f} seconds"),
+        ("Estimated speech duration", f"{report.speech_duration_seconds:.2f} seconds"),
+        ("Analysis windows", str(report.windows_analysed)),
+        ("Flagged windows", str(report.flagged_windows)),
+        ("Flagged share", f"{report.flagged_share:.1%}"),
+        ("Highest AI likelihood score", f"{report.highest_p_fake:.1%}"),
+        ("Timestamp of highest score", seconds(report.highest_score_timestamp)),
+    ]
+
+    summary_table = Table(
+        [[make_cell(k), make_cell(v)] for k, v in summary_rows],
+        colWidths=[52 * mm, 115 * mm],
+        hAlign="LEFT",
+    )
+    summary_table.setStyle(
+        TableStyle([
+            ("BACKGROUND", (0, 0), (0, -1), CREAM),
+            ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+            ("GRID", (0, 0), (-1, -1), 0.5, BORDER),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 7),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 7),
+            ("TOPPADDING", (0, 0), (-1, -1), 5),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ])
+    )
+    story.append(summary_table)
+
+    story.append(Paragraph("Window-by-window results", heading_style))
+    window_rows = [[
+        make_cell("Start"),
+        make_cell("End"),
+        make_cell("AI likelihood"),
+        make_cell("Verdict"),
+    ]]
+
+    for score in report.window_scores:
+        window_rows.append([
+            make_cell(seconds(score.start_seconds)),
+            make_cell(seconds(score.end_seconds)),
+            make_cell(f"{score.p_fake:.1%}"),
+            make_cell(score.verdict.capitalize()),
+        ])
+
+    if len(window_rows) == 1:
+        window_rows.append([make_cell("No windows analysed"), "", "", ""])
+
+    window_table = Table(
+        window_rows,
+        colWidths=[35 * mm, 35 * mm, 48 * mm, 49 * mm],
+        repeatRows=1,
+        hAlign="LEFT",
+    )
+    window_table.setStyle(
+        TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), CREAM),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("GRID", (0, 0), (-1, -1), 0.5, BORDER),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 6),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+            ("TOPPADDING", (0, 0), (-1, -1), 5),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ])
+    )
+    story.append(window_table)
+
+    story.append(Paragraph("Flagged time ranges", heading_style))
+    if report.flagged_ranges:
+        range_rows = [[make_cell("Start"), make_cell("End")]]
+        for item in report.flagged_ranges:
+            range_rows.append([
+                make_cell(seconds(item.start_seconds)),
+                make_cell(seconds(item.end_seconds)),
+            ])
+        range_table = Table(
+            range_rows,
+            colWidths=[83.5 * mm, 83.5 * mm],
+            repeatRows=1,
+        )
+        range_table.setStyle(
+            TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), CREAM),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("GRID", (0, 0), (-1, -1), 0.5, BORDER),
+                ("LEFTPADDING", (0, 0), (-1, -1), 7),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 7),
+                ("TOPPADDING", (0, 0), (-1, -1), 5),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+            ])
+        )
+        story.append(range_table)
+    else:
+        story.append(Paragraph("No windows were flagged in this analysis.", body_style))
+
+    story.extend([
+        Spacer(1, 10),
+        Paragraph("Important limitation", heading_style),
+        Table(
+            [[Paragraph(
+                "This report contains automated model estimates, not proof that a "
+                "recording is genuine or AI-generated. Scores can be affected by "
+                "background noise, compression, short speech, recording quality, "
+                "and voice generators not represented in the model's training data. "
+                "Review the recording and consider independent verification before "
+                "making important decisions.",
+                warning_style,
+            )]],
+            colWidths=[167 * mm],
+            style=TableStyle([
+                ("BACKGROUND", (0, 0), (-1, -1), AMBER_BG),
+                ("BOX", (0, 0), (-1, -1), 1, colors.HexColor("#B85C00")),
+                ("LEFTPADDING", (0, 0), (-1, -1), 9),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 9),
+                ("TOPPADDING", (0, 0), (-1, -1), 8),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+            ]),
+        ),
+    ])
+
+    doc.build(story, onFirstPage=_footer, onLaterPages=_footer)
+    return buffer.getvalue()

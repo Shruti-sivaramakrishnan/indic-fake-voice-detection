@@ -575,41 +575,26 @@ def render_call_analysis(lang: str) -> None:
     else:
         st.info(t("call_no_flagged", lang))
 
-    csv_buffer = io.StringIO()
-
-    writer = csv.DictWriter(
-        csv_buffer,
-        fieldnames=[
-            "start_seconds",
-            "end_seconds",
-            "raw_logit",
-            "p_fake",
-            "verdict",
-        ],
-    )
-
-    writer.writeheader()
-
-    for score in report.window_scores:
-        writer.writerow({
-            "start_seconds": score.start_seconds,
-            "end_seconds": score.end_seconds,
-            "raw_logit": score.raw_logit,
-            "p_fake": score.p_fake,
-            "verdict": score.verdict,
-        })
-
     safe_stem = Path(
         st.session_state.call_audio_filename or "call_recording"
     ).stem
 
-    st.download_button(
-        label=t("call_csv_button", lang),
-        data=csv_buffer.getvalue(),
-        file_name=f"{safe_stem}_call_analysis.csv",
-        mime="text/csv",
-        use_container_width=True,
-    )
+    try:
+        call_report_pdf = evidence_report.generate_call_analysis_report(
+            report,
+            st.session_state.call_audio_filename or "call_recording",
+        )
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Call Analysis PDF generation failed", exc_info=exc)
+        st.warning(t("pdf_error", lang))
+    else:
+        st.download_button(
+            label=t("pdf_button", lang),
+            data=call_report_pdf,
+            file_name=f"voice_guard_{safe_stem}_call_analysis.pdf",
+            mime="application/pdf",
+            use_container_width=True,
+        )
 
 def render_app() -> None:
     lang = current_lang()
