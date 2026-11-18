@@ -398,88 +398,102 @@ def render_call_analysis(lang: str) -> None:
 
     import pandas as pd
 
-    st.markdown(
-        f"""
-        <div class="vg-section-kicker">{html.escape(t("workspace_kicker", lang))}</div>
-        <h2 class="vg-section-title">{html.escape(t("call_analysis_mode", lang))}</h2>
-        """,
-        unsafe_allow_html=True,
-    )
+    upload_col, process_col = st.columns([1.55, 0.85], gap="large")
 
-    uploaded = st.file_uploader(
-        t("call_upload_label", lang),
-        type=ACCEPTED_TYPES,
-        help=t("call_upload_help", lang),
-        key="call_audio_upload",
-    )
+    with upload_col:
+        upload_panel = st.container(border=True)
 
-    audio_bytes = uploaded.getvalue() if uploaded is not None else None
-    selected_hash = (
-        hashlib.sha256(audio_bytes).hexdigest()
-        if audio_bytes is not None
-        else None
-    )
-
-    if selected_hash != st.session_state.call_selected_hash:
-        st.session_state.call_selected_hash = selected_hash
-        st.session_state.call_result = None
-        st.session_state.call_result_hash = None
-        st.session_state.call_result_error = None
-        st.session_state.call_audio_filename = None
-
-    if uploaded is not None and audio_bytes is not None:
-        st.audio(audio_bytes)
-        st.caption(f"{uploaded.name} · {format_bytes(len(audio_bytes))}")
-
-    analyze = st.button(
-        t("call_analyze_button", lang),
-        type="primary",
-        use_container_width=True,
-        disabled=uploaded is None,
-        key="run_call_analysis",
-    )
-
-    if analyze and audio_bytes is not None:
-        st.session_state.call_result = None
-        st.session_state.call_result_hash = None
-        st.session_state.call_result_error = None
-
-        progress_bar = st.progress(0.0)
-        progress_status = st.empty()
-
-        def update_progress(value: float) -> None:
-            value = min(1.0, max(0.0, float(value)))
-            progress_bar.progress(value)
-            progress_status.text(
-                f"{t('call_analyzing', lang)} {value:.0%}"
+        with upload_panel:
+            st.markdown(
+                f"""
+                <div class="vg-section-kicker">{html.escape(t("workspace_kicker", lang))}</div>
+                <h2 class="vg-section-title">{html.escape(t("call_analysis_mode", lang))}</h2>
+                """,
+                unsafe_allow_html=True,
             )
 
-        try:
-            with st.spinner(t("call_analyzing", lang)):
-                report = call_analysis.analyze_call(
-                    audio_bytes,
-                    progress_callback=update_progress,
+            uploaded = st.file_uploader(
+                t("call_upload_label", lang),
+                type=ACCEPTED_TYPES,
+                help=t("call_upload_help", lang),
+                key="call_audio_upload",
+            )
+
+            audio_bytes = uploaded.getvalue() if uploaded is not None else None
+
+            selected_hash = (
+                hashlib.sha256(audio_bytes).hexdigest()
+                if audio_bytes is not None
+                else None
+            )
+
+            if selected_hash != st.session_state.call_selected_hash:
+                st.session_state.call_selected_hash = selected_hash
+                st.session_state.call_result = None
+                st.session_state.call_result_hash = None
+                st.session_state.call_result_error = None
+                st.session_state.call_audio_filename = None
+
+            if uploaded is not None and audio_bytes is not None:
+                st.audio(audio_bytes)
+                st.caption(
+                    f"{uploaded.name} · {format_bytes(len(audio_bytes))}"
                 )
 
-            st.session_state.call_result = report
-            st.session_state.call_result_hash = selected_hash
-            st.session_state.call_audio_filename = uploaded.name
-            progress_bar.progress(1.0)
-            progress_status.empty()
-
-        except Exception as exc:  # noqa: BLE001
-            LOGGER.exception("Call analysis failed", exc_info=exc)
-            st.session_state.call_result = None
-            st.session_state.call_result_hash = None
-            st.session_state.call_result_error = safe_error_message(
-                exc, lang
+            analyze = st.button(
+                t("call_analyze_button", lang),
+                type="primary",
+                use_container_width=True,
+                disabled=uploaded is None,
+                key="run_call_analysis",
             )
-            progress_status.empty()
 
-    if st.session_state.call_result_error:
-        st.error(st.session_state.call_result_error)
+            if analyze and audio_bytes is not None:
+                st.session_state.call_result = None
+                st.session_state.call_result_hash = None
+                st.session_state.call_result_error = None
+
+                progress_bar = st.progress(0.0)
+                progress_status = st.empty()
+
+                def update_progress(value: float) -> None:
+                    value = min(1.0, max(0.0, float(value)))
+                    progress_bar.progress(value)
+                    progress_status.text(
+                        f"{t('call_analyzing', lang)} {value:.0%}"
+                    )
+
+                try:
+                    with st.spinner(t("call_analyzing", lang)):
+                        report = call_analysis.analyze_call(
+                            audio_bytes,
+                            progress_callback=update_progress,
+                        )
+
+                    st.session_state.call_result = report
+                    st.session_state.call_result_hash = selected_hash
+                    st.session_state.call_audio_filename = uploaded.name
+
+                    progress_bar.progress(1.0)
+                    progress_status.empty()
+
+                except Exception as exc:  # noqa: BLE001
+                    LOGGER.exception("Call analysis failed", exc_info=exc)
+                    st.session_state.call_result = None
+                    st.session_state.call_result_hash = None
+                    st.session_state.call_result_error = safe_error_message(
+                        exc, lang
+                    )
+                    progress_status.empty()
+
+            if st.session_state.call_result_error:
+                st.error(st.session_state.call_result_error)
+
+    with process_col:
+        render_process_card(lang)
 
     report = st.session_state.call_result
+
     result_is_current = (
         report is not None
         and selected_hash is not None
@@ -493,18 +507,22 @@ def render_call_analysis(lang: str) -> None:
     st.subheader(t("call_summary", lang))
 
     metric_columns = st.columns(4)
+
     metric_columns[0].metric(
         t("call_speech_duration", lang),
         format_call_time(report.speech_duration_seconds),
     )
+
     metric_columns[1].metric(
         t("call_windows", lang),
         report.windows_analysed,
     )
+
     metric_columns[2].metric(
         t("call_flagged_share", lang),
         f"{report.flagged_share:.1%}",
     )
+
     metric_columns[3].metric(
         t("call_highest_score", lang),
         f"{report.highest_p_fake:.1%}",
@@ -539,11 +557,16 @@ def render_call_analysis(lang: str) -> None:
     if report.flagged_ranges:
         flagged_data = [
             {
-                t("call_start", lang): format_call_time(region.start_seconds),
-                t("call_end", lang): format_call_time(region.end_seconds),
+                t("call_start", lang): format_call_time(
+                    region.start_seconds
+                ),
+                t("call_end", lang): format_call_time(
+                    region.end_seconds
+                ),
             }
             for region in report.flagged_ranges
         ]
+
         st.dataframe(
             flagged_data,
             use_container_width=True,
@@ -553,6 +576,7 @@ def render_call_analysis(lang: str) -> None:
         st.info(t("call_no_flagged", lang))
 
     csv_buffer = io.StringIO()
+
     writer = csv.DictWriter(
         csv_buffer,
         fieldnames=[
@@ -563,6 +587,7 @@ def render_call_analysis(lang: str) -> None:
             "verdict",
         ],
     )
+
     writer.writeheader()
 
     for score in report.window_scores:
@@ -585,7 +610,6 @@ def render_call_analysis(lang: str) -> None:
         mime="text/csv",
         use_container_width=True,
     )
-
 
 def render_app() -> None:
     lang = current_lang()

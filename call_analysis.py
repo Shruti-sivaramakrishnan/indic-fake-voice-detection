@@ -279,7 +279,26 @@ def analyze_call(
     window_scores = []
 
     for index, window in enumerate(windows):
-        segment = waveform[window.start_sample:window.end_sample]
+        segment_start = window.start_seconds
+        segment_end = window.end_seconds
+        segment_duration = segment_end - segment_start
+
+        # Expand short Call Analysis windows using surrounding audio.
+        # Single Clip and the shared model pipeline are not modified.
+        if segment_duration < window_seconds and duration_seconds >= window_seconds:
+            center = (segment_start + segment_end) / 2.0
+            segment_start = max(
+                0.0,
+                min(
+                    center - window_seconds / 2.0,
+                    duration_seconds - window_seconds,
+                ),
+            )
+            segment_end = segment_start + window_seconds
+
+        start_sample = int(round(segment_start * sample_rate))
+        end_sample = int(round(segment_end * sample_rate))
+        segment = waveform[start_sample:end_sample]
 
         raw_logit, p_fake = model_pipeline.score_waveform(
             segment,
@@ -290,8 +309,8 @@ def analyze_call(
 
         window_scores.append(
             WindowScore(
-                start_seconds=window.start_seconds,
-                end_seconds=window.end_seconds,
+                start_seconds=segment_start,
+                end_seconds=segment_end,
                 raw_logit=raw_logit,
                 p_fake=p_fake,
                 verdict=verdict,
