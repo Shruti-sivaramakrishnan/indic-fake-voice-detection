@@ -22,6 +22,7 @@ import streamlit as st
 
 import call_analysis
 import codec_robustness
+import conversation_analysis
 import evidence_report
 import i18n
 import ui_kit
@@ -618,6 +619,58 @@ def render_call_analysis(lang: str) -> None:
             mime="application/pdf",
             use_container_width=True,
         )
+
+    st.divider()
+    st.subheader("Optional transcript cue analysis")
+    st.caption(
+        "Upload a UTF-8 CSV with start_seconds, end_seconds, and text. "
+        "This lexical screening does not transcribe audio and does not prove fraud or intent."
+    )
+    transcript_upload = st.file_uploader(
+        "Timestamped transcript CSV",
+        type=["csv"],
+        key=f"call_transcript_{selected_hash}",
+    )
+    if transcript_upload is not None:
+        try:
+            transcript_segments = conversation_analysis.parse_transcript_csv(
+                transcript_upload.getvalue(),
+                call_duration_seconds=report.duration_seconds,
+            )
+            conversation_report = conversation_analysis.analyze_transcript(
+                transcript_segments
+            )
+        except ValueError as exc:
+            st.error(str(exc))
+        else:
+            cue_columns = st.columns(3)
+            cue_columns[0].metric("Transcript segments", conversation_report.segments)
+            cue_columns[1].metric("Lexical sentiment", conversation_report.sentiment)
+            cue_columns[2].metric("Cue hits", len(conversation_report.cue_hits))
+            if conversation_report.category_counts:
+                st.dataframe(
+                    [
+                        {"category": category, "hits": count}
+                        for category, count in conversation_report.category_counts.items()
+                    ],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+                st.dataframe(
+                    [
+                        {
+                            "time": format_call_time(hit.start_seconds),
+                            "category": hit.category,
+                            "matched phrase": hit.matched_phrase,
+                            "transcript": hit.text,
+                        }
+                        for hit in conversation_report.cue_hits
+                    ],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+            else:
+                st.info("No configured urgency, secrecy, payment, credential, authority, or pressure phrases were found.")
 
 def render_app() -> None:
     lang = current_lang()

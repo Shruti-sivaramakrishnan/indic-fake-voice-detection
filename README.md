@@ -141,6 +141,18 @@ public deployment should still be treated as untrusted infrastructure.
 The timeline is an automated screening aid, not proof. Noise, compression, replay,
 multiple speakers, and generators outside the training data can change the score.
 
+After a call result is available, an optional timestamped transcript CSV can be
+uploaded with `start_seconds`, `end_seconds`, and `text` columns. Voice Guard
+reports lexical sentiment and highlights configured urgency, secrecy, payment,
+credential or OTP, authority or familiarity, and pressure or threat phrases in
+English, Hindi, Tamil, and Kannada. A ready-to-use example is available at
+`docs/sample_call_transcript.csv`.
+
+Transcript cue analysis does not transcribe the audio, separate speakers, infer
+intent, or prove fraud. It is a Phase 2 foundation for review support; automatic
+multilingual ASR, diarization, and a labelled benign/manipulative evaluation set
+remain future work.
+
 ## Important limitations
 
 - A detector result is not proof of identity, authenticity, intent, or deception.

@@ -1,0 +1,136 @@
+{
+  "protocol": {
+    "source": "historical frozen v1 test examples",
+    "purpose": "feature acceptance only; no tuning or final generalisation claim",
+    "spliced_layout_seconds": [
+      120,
+      60,
+      120
+    ],
+    "expected_fake_interval_seconds": [
+      120.0,
+      180.0
+    ],
+    "calls": 5,
+    "languages": [
+      "Assamese",
+      "Bengali",
+      "Bodo"
+    ]
+  },
+  "spliced_results": [
+    {
+      "call_id": "assamese_1",
+      "language": "Assamese",
+      "windows": 84,
+      "flagged_share": 0.10714285714285714,
+      "best_flagged_start": 139.9,
+      "best_flagged_end": 144.425,
+      "start_delta_seconds": 19.900000000000006,
+      "end_delta_seconds": -35.57499999999999,
+      "overlap_seconds": 4.525000000000006,
+      "boundary_within_6_seconds": false,
+      "elapsed_seconds": 23.02407233300619
+    },
+    {
+      "call_id": "assamese_2",
+      "language": "Assamese",
+      "windows": 85,
+      "flagged_share": 0.12941176470588237,
+      "best_flagged_start": 131.76,
+      "best_flagged_end": 136.285,
+      "start_delta_seconds": 11.759999999999991,
+      "end_delta_seconds": -43.715,
+      "overlap_seconds": 4.525000000000006,
+      "boundary_within_6_seconds": false,
+      "elapsed_seconds": 20.05697874998441
+    },
+    {
+      "call_id": "bengali_1",
+      "language": "Bengali",
+      "windows": 54,
+      "flagged_share": 0.37037037037037035,
+      "best_flagged_start": 118.39,
+      "best_flagged_end": 181.39,
+      "start_delta_seconds": -1.6099999999999994,
+      "end_delta_seconds": 1.3899999999999864,
+      "overlap_seconds": 60.0,
+      "boundary_within_6_seconds": true,
+      "elapsed_seconds": 12.78955266700359
+    },
+    {
+      "call_id": "bengali_2",
+      "language": "Bengali",
+      "windows": 54,
+      "flagged_share": 0.37037037037037035,
+      "best_flagged_start": 119.44,
+      "best_flagged_end": 180.015,
+      "start_delta_seconds": -0.5600000000000023,
+      "end_delta_seconds": 0.014999999999986358,
+      "overlap_seconds": 60.0,
+      "boundary_within_6_seconds": true,
+      "elapsed_seconds": 12.804223165963776
+    },
+    {
+      "call_id": "bodo_1",
+      "language": "Bodo",
+      "windows": 63,
+      "flagged_share": 0.2698412698412698,
+      "best_flagged_start": 138.99,
+      "best_flagged_end": 147.395,
+      "start_delta_seconds": 18.99000000000001,
+      "end_delta_seconds": -32.60499999999999,
+      "overlap_seconds": 8.405000000000001,
+      "boundary_within_6_seconds": false,
+      "elapsed_seconds": 14.966573042038362
+    }
+  ],
+  "all_real_results": [
+    {
+      "call_id": "assamese_all_real_1",
+      "language": "Assamese",
+      "windows": 93,
+      "flagged_windows": 0,
+      "flagged_share": 0.0,
+      "elapsed_seconds": 21.87087591603631
+    },
+    {
+      "call_id": "assamese_all_real_2",
+      "language": "Assamese",
+      "windows": 93,
+      "flagged_windows": 0,
+      "flagged_share": 0.0,
+      "elapsed_seconds": 22.63439025002299
+    },
+    {
+      "call_id": "bengali_all_real_1",
+      "language": "Bengali",
+      "windows": 41,
+      "flagged_windows": 0,
+      "flagged_share": 0.0,
+      "elapsed_seconds": 9.684276584011968
+    },
+    {
+      "call_id": "bengali_all_real_2",
+      "language": "Bengali",
+      "windows": 42,
+      "flagged_windows": 0,
+      "flagged_share": 0.0,
+      "elapsed_seconds": 10.002753541979473
+    },
+    {
+      "call_id": "bodo_all_real_1",
+      "language": "Bodo",
+      "windows": 61,
+      "flagged_windows": 0,
+      "flagged_share": 0.0,
+      "elapsed_seconds": 14.494058667041827
+    }
+  ],
+  "summary": {
+    "spliced_boundary_passes": 2,
+    "spliced_calls": 5,
+    "mean_all_real_flagged_share": 0.0,
+    "max_all_real_flagged_share": 0.0
+  }
+}

@@ -6,7 +6,10 @@ import argparse
 import hashlib
 import json
 import re
+import time
 import unicodedata
+import urllib.parse
+import urllib.request
 from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
@@ -51,13 +54,62 @@ def metadata_record(example: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def iter_hf_metadata(dataset_name: str, split: str) -> Iterable[Dict[str, Any]]:
-    from datasets import load_dataset
+    try:
+        from datasets import Audio, load_dataset
+    except ModuleNotFoundError:
+        yield from iter_dataset_server_metadata(dataset_name, split)
+        return
 
     dataset = load_dataset(dataset_name, split=split, streaming=True)
     if "audio" in dataset.column_names:
+        # Newer datasets releases decode Audio features while iterating unless
+        # decoding is explicitly disabled before the column is removed.
+        dataset = dataset.cast_column("audio", Audio(decode=False))
         dataset = dataset.remove_columns("audio")
     for example in dataset:
         yield metadata_record(example)
+
+
+def _fetch_json(url: str, attempts: int = 4, timeout: int = 120) -> Dict[str, Any]:
+    last_error: Optional[BaseException] = None
+    for attempt in range(attempts):
+        try:
+            request = urllib.request.Request(
+                url, headers={"User-Agent": "VoiceGuardMetadataExport/1.0"}
+            )
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except (OSError, TimeoutError, json.JSONDecodeError) as exc:
+            last_error = exc
+            if attempt + 1 < attempts:
+                time.sleep(2**attempt)
+    raise RuntimeError(f"Metadata request failed after {attempts} attempts: {last_error}")
+
+
+def iter_dataset_server_metadata(
+    dataset_name: str, split: str, page_size: int = 100
+) -> Iterable[Dict[str, Any]]:
+    """Stream row metadata through the public dataset server without audio bytes."""
+    offset = 0
+    while True:
+        query = urllib.parse.urlencode(
+            {
+                "dataset": dataset_name,
+                "config": "default",
+                "split": split,
+                "offset": offset,
+                "length": page_size,
+            }
+        )
+        payload = _fetch_json(f"https://datasets-server.huggingface.co/rows?{query}")
+        rows = payload.get("rows") or []
+        if not rows:
+            return
+        for entry in rows:
+            yield metadata_record(entry["row"])
+        offset += len(rows)
+        if len(rows) < page_size:
+            return
 
 
 def export_metadata(
