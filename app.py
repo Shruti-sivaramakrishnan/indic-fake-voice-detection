@@ -25,6 +25,7 @@ import codec_robustness
 import conversation_analysis
 import evidence_report
 import i18n
+import speech_transcription
 import ui_kit
 from i18n import t
 
@@ -63,6 +64,9 @@ for key, default in {
     "call_result_hash": None,
     "call_result_error": None,
     "call_audio_filename": None,
+    "call_conversation_result": None,
+    "call_conversation_hash": None,
+    "call_conversation_error": None,
 }.items():
     st.session_state.setdefault(key, default)
 
@@ -393,6 +397,60 @@ def format_call_time(seconds: float) -> str:
     return f"{minutes:02d}:{seconds:02d}"
 
 
+def render_conversation_report(
+    conversation_report,
+    transcript_segments,
+    source_label: str,
+    model_id: str | None = None,
+) -> None:
+    details = source_label if model_id is None else f"{source_label} · {model_id}"
+    st.caption(details)
+    cue_columns = st.columns(3)
+    cue_columns[0].metric("Transcript segments", conversation_report.segments)
+    cue_columns[1].metric("Lexical sentiment", conversation_report.sentiment)
+    cue_columns[2].metric("Cue hits", len(conversation_report.cue_hits))
+    with st.expander("Review generated transcript", expanded=False):
+        st.dataframe(
+            [
+                {
+                    "start": format_call_time(segment.start_seconds),
+                    "end": format_call_time(segment.end_seconds),
+                    "text": segment.text,
+                }
+                for segment in transcript_segments
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+    if conversation_report.category_counts:
+        st.dataframe(
+            [
+                {"category": category, "hits": count}
+                for category, count in conversation_report.category_counts.items()
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.dataframe(
+            [
+                {
+                    "time": format_call_time(hit.start_seconds),
+                    "category": hit.category,
+                    "matched phrase": hit.matched_phrase,
+                    "transcript": hit.text,
+                }
+                for hit in conversation_report.cue_hits
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.info(
+            "No configured urgency, secrecy, payment, credential, authority, "
+            "or pressure phrases were found."
+        )
+
+
 def render_call_analysis(lang: str) -> None:
     import pandas as pd
 
@@ -431,6 +489,9 @@ def render_call_analysis(lang: str) -> None:
                 st.session_state.call_result_hash = None
                 st.session_state.call_result_error = None
                 st.session_state.call_audio_filename = None
+                st.session_state.call_conversation_result = None
+                st.session_state.call_conversation_hash = None
+                st.session_state.call_conversation_error = None
 
             if uploaded is not None and audio_bytes is not None:
                 st.audio(audio_bytes)
@@ -621,10 +682,57 @@ def render_call_analysis(lang: str) -> None:
         )
 
     st.divider()
-    st.subheader("Optional transcript cue analysis")
+    st.subheader("Automatic conversation and sentiment analysis")
     st.caption(
-        "Upload a UTF-8 CSV with start_seconds, end_seconds, and text. "
-        "This lexical screening does not transcribe audio and does not prove fraud or intent."
+        "Voice Guard can transcribe the uploaded call with multilingual Whisper, "
+        "then run timestamped lexical sentiment and manipulation-cue screening. "
+        "The first run downloads the ASR model and may take several minutes."
+    )
+    run_automatic_conversation = st.button(
+        "Transcribe call and analyze conversation",
+        use_container_width=True,
+        key="run_automatic_conversation",
+    )
+    if run_automatic_conversation and audio_bytes is not None:
+        st.session_state.call_conversation_error = None
+        try:
+            with st.spinner("Transcribing and analyzing the call..."):
+                conversation_result = speech_transcription.analyze_audio_conversation(
+                    audio_bytes
+                )
+            st.session_state.call_conversation_result = conversation_result
+            st.session_state.call_conversation_hash = selected_hash
+        except speech_transcription.TranscriptionError as exc:
+            st.session_state.call_conversation_result = None
+            st.session_state.call_conversation_hash = None
+            st.session_state.call_conversation_error = str(exc)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.exception("Automatic conversation analysis failed", exc_info=exc)
+            st.session_state.call_conversation_result = None
+            st.session_state.call_conversation_hash = None
+            st.session_state.call_conversation_error = (
+                "Automatic conversation analysis failed. Use the transcript CSV fallback."
+            )
+
+    if st.session_state.call_conversation_error:
+        st.error(st.session_state.call_conversation_error)
+
+    automatic_result = st.session_state.call_conversation_result
+    if (
+        automatic_result is not None
+        and st.session_state.call_conversation_hash == selected_hash
+    ):
+        render_conversation_report(
+            automatic_result.conversation,
+            automatic_result.transcription.segments,
+            "Automatically generated transcript",
+            automatic_result.transcription.model_id,
+        )
+
+    st.markdown("#### Timestamped transcript fallback")
+    st.caption(
+        "If automatic transcription is unavailable, upload a UTF-8 CSV with "
+        "start_seconds, end_seconds, and text columns."
     )
     transcript_upload = st.file_uploader(
         "Timestamped transcript CSV",
@@ -643,34 +751,11 @@ def render_call_analysis(lang: str) -> None:
         except ValueError as exc:
             st.error(str(exc))
         else:
-            cue_columns = st.columns(3)
-            cue_columns[0].metric("Transcript segments", conversation_report.segments)
-            cue_columns[1].metric("Lexical sentiment", conversation_report.sentiment)
-            cue_columns[2].metric("Cue hits", len(conversation_report.cue_hits))
-            if conversation_report.category_counts:
-                st.dataframe(
-                    [
-                        {"category": category, "hits": count}
-                        for category, count in conversation_report.category_counts.items()
-                    ],
-                    use_container_width=True,
-                    hide_index=True,
-                )
-                st.dataframe(
-                    [
-                        {
-                            "time": format_call_time(hit.start_seconds),
-                            "category": hit.category,
-                            "matched phrase": hit.matched_phrase,
-                            "transcript": hit.text,
-                        }
-                        for hit in conversation_report.cue_hits
-                    ],
-                    use_container_width=True,
-                    hide_index=True,
-                )
-            else:
-                st.info("No configured urgency, secrecy, payment, credential, authority, or pressure phrases were found.")
+            render_conversation_report(
+                conversation_report,
+                transcript_segments,
+                "Uploaded transcript",
+            )
 
 def render_app() -> None:
     lang = current_lang()
