@@ -41,16 +41,23 @@ class ConversationReport:
     segments: int
     cue_hits: tuple[CueHit, ...]
     category_counts: dict[str, int]
-    sentiment: str
+    tone: str
+    risk_level: str
     positive_hits: int
     negative_hits: int
     first_elevated_cue_time: float | None
+
+    @property
+    def sentiment(self) -> str:
+        """Backward-compatible alias for callers that still use the old name."""
+        return self.tone
 
 
 CUE_PHRASES = {
     "urgency": (
         "urgent", "immediately", "right now", "hurry", "last chance",
-        "तुरंत", "अभी", "जल्दी", "உடனே", "இப்போது", "ತಕ್ಷಣ", "ಈಗಲೇ",
+        "तुरंत", "अभी भेजो", "अभी करो", "जल्दी", "உடனே", "இப்போது",
+        "ತಕ್ಷಣ", "ಈಗಲೇ",
     ),
     "secrecy": (
         "do not tell", "don't tell", "keep this secret", "confidential",
@@ -59,7 +66,8 @@ CUE_PHRASES = {
     ),
     "money_or_payment": (
         "send money", "transfer money", "bank account", "payment", "upi",
-        "पैसे भेज", "पैसा भेज", "भुगतान", "பணம் அனுப்பு", "வங்கி கணக்கு",
+        "पैसे भेजो", "पैसा भेजो", "पैसे भेजें", "पैसा भेजें", "भुगतान",
+        "பணம் அனுப்பு", "வங்கி கணக்கு",
         "ಹಣ ಕಳುಹಿಸಿ", "ಬ್ಯಾಂಕ್ ಖಾತೆ",
     ),
     "credential_or_otp": (
@@ -89,9 +97,27 @@ NEGATIVE_PHRASES = (
 
 
 def _normalize(text: str) -> str:
+    r"""Normalize text without deleting Indic vowel signs or viramas.
+
+    Python's ``\w`` does not include every Unicode combining mark.  Filtering
+    with a ``[^\w]`` regular expression therefore destroys meaningful parts of
+    Devanagari, Tamil, Kannada, and other Indic words.  Retain Unicode letters,
+    numbers, and marks explicitly, while converting punctuation and symbols to
+    spaces so phrase boundaries remain stable.
+    """
     value = unicodedata.normalize("NFKC", text).casefold()
-    value = re.sub(r"[^\w\s'‌-]", " ", value, flags=re.UNICODE)
-    return re.sub(r"\s+", " ", value).strip()
+    kept = []
+    for character in value:
+        category = unicodedata.category(character)
+        if character.isspace():
+            kept.append(" ")
+        elif category[0] in {"L", "M", "N"}:
+            kept.append(character)
+        elif character in {"'", "-", "\u200c", "\u200d"}:
+            kept.append(character)
+        else:
+            kept.append(" ")
+    return re.sub(r"\s+", " ", "".join(kept)).strip()
 
 
 def parse_transcript_csv(
@@ -152,7 +178,12 @@ def analyze_transcript(segments: Iterable[TranscriptSegment]) -> ConversationRep
         normalized = _normalize(segment.text)
         segment_categories = set()
         for category, phrases in CUE_PHRASES.items():
-            for phrase in _phrase_hits(normalized, phrases):
+            phrase_hits = _phrase_hits(normalized, phrases)
+            if phrase_hits:
+                # A segment contributes at most one hit to each category. This
+                # prevents near-synonymous phrase variants from double-counting
+                # a single request.
+                phrase = phrase_hits[0]
                 hits.append(
                     CueHit(
                         segment.start_seconds,
@@ -169,20 +200,28 @@ def analyze_transcript(segments: Iterable[TranscriptSegment]) -> ConversationRep
             elevated_time = segment.start_seconds
 
     if positive_hits and negative_hits:
-        sentiment = "mixed"
+        tone = "mixed"
     elif positive_hits:
-        sentiment = "positive"
+        tone = "positive"
     elif negative_hits:
-        sentiment = "negative"
+        tone = "negative"
     else:
-        sentiment = "neutral_or_unknown"
+        tone = "neutral_or_unknown"
 
     counts = Counter(hit.category for hit in hits)
+    distinct_categories = len(counts)
+    if distinct_categories >= 3:
+        risk_level = "High"
+    elif distinct_categories >= 1:
+        risk_level = "Medium"
+    else:
+        risk_level = "Low"
     return ConversationReport(
         segments=len(segment_list),
         cue_hits=tuple(hits),
         category_counts=dict(sorted(counts.items())),
-        sentiment=sentiment,
+        tone=tone,
+        risk_level=risk_level,
         positive_hits=positive_hits,
         negative_hits=negative_hits,
         first_elevated_cue_time=elevated_time,

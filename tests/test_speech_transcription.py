@@ -46,7 +46,8 @@ def test_audio_to_conversation_orchestration_is_end_to_end():
 
     result = analyze_audio_conversation(b"call", transcriber=fake_transcriber)
     assert result.transcription.model_id == "test-asr"
-    assert result.conversation.sentiment == "positive"
+    assert result.conversation.tone == "positive"
+    assert result.conversation.risk_level == "Medium"
     assert result.conversation.category_counts == {
         "credential_or_otp": 1,
         "urgency": 1,

@@ -405,10 +405,16 @@ def render_conversation_report(
 ) -> None:
     details = source_label if model_id is None else f"{source_label} · {model_id}"
     st.caption(details)
-    cue_columns = st.columns(3)
+    cue_columns = st.columns(4)
     cue_columns[0].metric("Transcript segments", conversation_report.segments)
-    cue_columns[1].metric("Lexical sentiment", conversation_report.sentiment)
-    cue_columns[2].metric("Cue hits", len(conversation_report.cue_hits))
+    cue_columns[1].metric("Lexical tone", conversation_report.tone)
+    cue_columns[2].metric("Conversation risk", conversation_report.risk_level)
+    cue_columns[3].metric("Cue hits", len(conversation_report.cue_hits))
+    if conversation_report.risk_level == "High":
+        st.warning(
+            "High conversation risk: three or more distinct manipulation-cue "
+            "categories were found. Review the highlighted transcript segments."
+        )
     with st.expander("Review generated transcript", expanded=False):
         st.dataframe(
             [
@@ -682,10 +688,10 @@ def render_call_analysis(lang: str) -> None:
         )
 
     st.divider()
-    st.subheader("Automatic conversation and sentiment analysis")
+    st.subheader("Automatic conversation tone and risk analysis")
     st.caption(
         "Voice Guard can transcribe the uploaded call with multilingual Whisper, "
-        "then run timestamped lexical sentiment and manipulation-cue screening. "
+        "then run timestamped lexical tone and manipulation-cue risk screening. "
         "The first run downloads the ASR model and may take several minutes."
     )
     run_automatic_conversation = st.button(

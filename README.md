@@ -115,7 +115,7 @@ The notebook reads the token from Kaggle Secrets and never prints it. Do not pas
 - `app.py` - Streamlit interaction and result state
 - `codec_robustness.py` - in-memory FFmpeg channel simulations and score comparison
 - `speech_transcription.py` - multilingual timestamped ASR and audio-to-conversation orchestration
-- `conversation_analysis.py` - lexical sentiment and manipulation-cue screening
+- `conversation_analysis.py` - lexical tone and manipulation-cue risk screening
 - `voice_guard_core.py` - dependency-light input and decision policies
 - `model_pipeline.py` - frontend, heads, training, inference, and evaluation
 - `evidence_report.py` - automated analysis PDF
@@ -146,7 +146,8 @@ multiple speakers, and generators outside the training data can change the score
 After a call result is available, **Transcribe call and analyze conversation**
 runs multilingual Whisper ASR on the same in-memory audio, keeps timestamped
 segments, and passes them directly to conversation analysis. Voice Guard reports
-lexical sentiment and highlights configured urgency, secrecy, payment, credential
+lexical tone, assigns a Low, Medium, or High conversation risk from the number
+of distinct cue categories, and highlights configured urgency, secrecy, payment, credential
 or OTP, authority or familiarity, and pressure or threat phrases in English,
 Hindi, Tamil, and Kannada. The default ASR checkpoint is `openai/whisper-base`;
 set `VOICE_GUARD_ASR_MODEL` to another compatible checkpoint or
