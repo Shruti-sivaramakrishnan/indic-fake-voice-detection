@@ -393,9 +393,6 @@ def format_call_time(seconds: float) -> str:
 
 
 def render_call_analysis(lang: str) -> None:
-    import csv
-    import io
-
     import pandas as pd
 
     upload_col, process_col = st.columns([1.55, 0.85], gap="large")
@@ -536,17 +533,33 @@ def render_call_analysis(lang: str) -> None:
     st.divider()
     st.subheader(t("call_timeline", lang))
 
-    chart_data = pd.DataFrame([
-        {
-            "Time (seconds)": (
-                score.start_seconds + score.end_seconds
-            ) / 2,
-            "AI likelihood": score.p_fake,
-            "Lower threshold (0.35)": 0.35,
-            "Upper threshold (0.65)": 0.65,
-        }
-        for score in report.window_scores
-    ]).set_index("Time (seconds)")
+    time_label = t("call_time_seconds", lang)
+    score_label = t("call_score_column", lang)
+    lower_label = t("call_lower_threshold", lang)
+    upper_label = t("call_upper_threshold", lang)
+    chart_rows = []
+    previous_end = None
+    for score in report.window_scores:
+        if previous_end is not None and score.start_seconds > previous_end + 0.01:
+            chart_rows.append(
+                {
+                    time_label: (previous_end + score.start_seconds) / 2,
+                    score_label: float("nan"),
+                    lower_label: 0.35,
+                    upper_label: 0.65,
+                }
+            )
+        chart_rows.append(
+            {
+                time_label: (score.start_seconds + score.end_seconds) / 2,
+                score_label: score.p_fake,
+                lower_label: 0.35,
+                upper_label: 0.65,
+            }
+        )
+        previous_end = max(previous_end or 0.0, score.end_seconds)
+
+    chart_data = pd.DataFrame(chart_rows).set_index(time_label)
 
     st.line_chart(chart_data)
     st.caption(t("call_limit_note", lang))
@@ -575,9 +588,19 @@ def render_call_analysis(lang: str) -> None:
     else:
         st.info(t("call_no_flagged", lang))
 
-    safe_stem = Path(
+    safe_stem = "".join(
+        char for char in Path(
         st.session_state.call_audio_filename or "call_recording"
-    ).stem
+        ).stem if char.isalnum() or char in "-_"
+    )[:60] or "call_recording"
+
+    st.download_button(
+        label=t("call_csv_button", lang),
+        data=call_analysis.report_to_csv_bytes(report),
+        file_name=f"voice_guard_{safe_stem}_windows.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
 
     try:
         call_report_pdf = evidence_report.generate_call_analysis_report(

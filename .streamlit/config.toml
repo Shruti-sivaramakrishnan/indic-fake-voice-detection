@@ -17,5 +17,5 @@ textColor = "#111827"
 font = "sans-serif"
 
 [server]
-maxUploadSize = 25
-maxMessageSize = 25
+maxUploadSize = 200
+maxMessageSize = 200

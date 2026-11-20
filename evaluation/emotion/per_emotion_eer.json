@@ -1,0 +1,66 @@
+{
+  "summary": {
+    "input_csv": "evaluation/clean/frozen_test_predictions_with_language.csv",
+    "total_prediction_rows": 3111,
+    "emotion_labeled_rows": 979,
+    "reportable_emotions": 6,
+    "bootstrap_iterations": 1000,
+    "scope_warning": "Diagnostic v1 result only. The historical split has known group overlap; repeat on the locked group-safe v2 test set before publication."
+  },
+  "results": [
+    {
+      "emotion": "Anger",
+      "clips": 162,
+      "real_clips": 79,
+      "fake_clips": 83,
+      "eer": 0.012353210309592803,
+      "eer_ci95_low": 0.0,
+      "eer_ci95_high": 0.037059630928778405
+    },
+    {
+      "emotion": "Disgust",
+      "clips": 153,
+      "real_clips": 78,
+      "fake_clips": 75,
+      "eer": 0.0,
+      "eer_ci95_low": 0.0,
+      "eer_ci95_high": 0.0
+    },
+    {
+      "emotion": "Fear",
+      "clips": 160,
+      "real_clips": 77,
+      "fake_clips": 83,
+      "eer": 0.0,
+      "eer_ci95_low": 0.0,
+      "eer_ci95_high": 0.0
+    },
+    {
+      "emotion": "Happy",
+      "clips": 160,
+      "real_clips": 84,
+      "fake_clips": 76,
+      "eer": 0.0,
+      "eer_ci95_low": 0.0,
+      "eer_ci95_high": 0.0
+    },
+    {
+      "emotion": "Sad",
+      "clips": 171,
+      "real_clips": 72,
+      "fake_clips": 99,
+      "eer": 0.0,
+      "eer_ci95_low": 0.0,
+      "eer_ci95_high": 0.0
+    },
+    {
+      "emotion": "Surprise",
+      "clips": 173,
+      "real_clips": 92,
+      "fake_clips": 81,
+      "eer": 0.0,
+      "eer_ci95_low": 0.0,
+      "eer_ci95_high": 0.0
+    }
+  ]
+}

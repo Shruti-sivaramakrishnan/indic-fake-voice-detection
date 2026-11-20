@@ -121,6 +121,26 @@ The notebook reads the token from Kaggle Secrets and never prints it. Do not pas
 - `evaluation/` - historical benchmark and robustness artifacts
 - `tests/` - safety/policy/report tests
 
+## Long call analysis
+
+The Streamlit app now has two separate modes. **Single Clip** keeps the original
+1 to 30 second and 25 MB limits. **Call Analysis** accepts one 30 second to
+15 minute recording up to 200 MB in WAV, MP3, FLAC, OGG, or M4A format.
+
+Call Analysis decodes the recording in memory, estimates speech-active regions,
+and scores overlapping six-second windows with a three-second hop. The model and
+decision thresholds are unchanged. The result includes a timeline, merged flagged
+time ranges, summary statistics, a per-window CSV, and a PDF report. Silence stays
+visible as gaps because every result retains its original recording timestamp.
+
+For a reliable demo, warm the model once before timing a long call. A 15-minute
+continuous recording can produce about 300 model calls, so CPU analysis may take
+several minutes. The uploaded audio is not intentionally written to disk, but a
+public deployment should still be treated as untrusted infrastructure.
+
+The timeline is an automated screening aid, not proof. Noise, compression, replay,
+multiple speakers, and generators outside the training data can change the score.
+
 ## Important limitations
 
 - A detector result is not proof of identity, authenticity, intent, or deception.

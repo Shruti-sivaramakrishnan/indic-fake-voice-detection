@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import csv
+import io
 from dataclasses import dataclass
-from typing import List
+from typing import Callable, List
 
 import numpy as np
 
@@ -214,19 +216,22 @@ def analyze_call(
     checkpoint_dir: str | None = None,
     window_seconds: float = 6.0,
     hop_seconds: float = 3.0,
-    progress_callback=None,
+    progress_callback: Callable[[float], None] | None = None,
+    input_policy=None,
 ) -> CallAnalysisReport:
     """Analyse a long phone call using the existing Voice Guard model."""
     import model_pipeline
 
     from voice_guard_core import (
+        AudioValidationError,
         CallInputPolicy,
         validate_encoded_audio_size,
     )
 
+    policy = input_policy or CallInputPolicy()
     validate_encoded_audio_size(
         audio_bytes,
-        policy=CallInputPolicy(),
+        policy=policy,
     )
 
     waveform, original_sample_rate = model_pipeline.decode_audio_bytes(
@@ -244,10 +249,15 @@ def analyze_call(
 
     duration_seconds = waveform.size / float(original_sample_rate)
 
-    if duration_seconds > 900.0:
-        raise ValueError("Call recordings cannot exceed 15 minutes.")
-    if duration_seconds < 1.0:
-        raise ValueError("The recording must be at least 1 second long.")
+    if duration_seconds > policy.max_duration_seconds:
+        raise AudioValidationError(
+            "The call is too long. Upload a recording of 15 minutes or less."
+        )
+    if duration_seconds < policy.min_duration_seconds:
+        raise AudioValidationError(
+            "The call is too short. Call analysis requires at least 30 seconds. "
+            "Use Single Clip mode for shorter recordings."
+        )
 
     waveform = model_pipeline.ensure_target_sample_rate(
         waveform,
@@ -265,7 +275,7 @@ def analyze_call(
     )
 
     if not windows:
-        raise ValueError(
+        raise AudioValidationError(
             "No speech-active regions long enough for analysis were detected."
         )
 
@@ -279,25 +289,25 @@ def analyze_call(
     window_scores = []
 
     for index, window in enumerate(windows):
-        segment_start = window.start_seconds
-        segment_end = window.end_seconds
-        segment_duration = segment_end - segment_start
+        scoring_start = window.start_seconds
+        scoring_end = window.end_seconds
+        segment_duration = scoring_end - scoring_start
 
         # Expand short Call Analysis windows using surrounding audio.
         # Single Clip and the shared model pipeline are not modified.
         if segment_duration < window_seconds and duration_seconds >= window_seconds:
-            center = (segment_start + segment_end) / 2.0
-            segment_start = max(
+            center = (scoring_start + scoring_end) / 2.0
+            scoring_start = max(
                 0.0,
                 min(
                     center - window_seconds / 2.0,
                     duration_seconds - window_seconds,
                 ),
             )
-            segment_end = segment_start + window_seconds
+            scoring_end = scoring_start + window_seconds
 
-        start_sample = int(round(segment_start * sample_rate))
-        end_sample = int(round(segment_end * sample_rate))
+        start_sample = int(round(scoring_start * sample_rate))
+        end_sample = int(round(scoring_end * sample_rate))
         segment = waveform[start_sample:end_sample]
 
         raw_logit, p_fake = model_pipeline.score_waveform(
@@ -309,8 +319,10 @@ def analyze_call(
 
         window_scores.append(
             WindowScore(
-                start_seconds=segment_start,
-                end_seconds=segment_end,
+                # Keep the original speech-region timestamps even if the audio
+                # used for scoring was expanded to a full six seconds.
+                start_seconds=window.start_seconds,
+                end_seconds=window.end_seconds,
                 raw_logit=raw_logit,
                 p_fake=p_fake,
                 verdict=verdict,
@@ -344,3 +356,23 @@ def analyze_call(
         window_scores=window_scores,
         flagged_ranges=merge_flagged_ranges(window_scores),
     )
+
+
+def report_to_csv_bytes(report: CallAnalysisReport) -> bytes:
+    """Serialize one row per analysed window without writing audio or temp files."""
+    output = io.StringIO(newline="")
+    writer = csv.writer(output)
+    writer.writerow(
+        ["window", "start_seconds", "end_seconds", "p_fake", "verdict"]
+    )
+    for index, score in enumerate(report.window_scores, start=1):
+        writer.writerow(
+            [
+                index,
+                f"{score.start_seconds:.3f}",
+                f"{score.end_seconds:.3f}",
+                f"{score.p_fake:.8f}",
+                score.verdict,
+            ]
+        )
+    return output.getvalue().encode("utf-8")

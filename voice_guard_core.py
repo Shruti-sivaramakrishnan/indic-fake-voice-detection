@@ -55,7 +55,7 @@ class CallInputPolicy:
     """Input limits for long phone-call recordings."""
 
     max_bytes: int = 200 * 1024 * 1024
-    min_duration_seconds: float = 1.0
+    min_duration_seconds: float = 30.0
     max_duration_seconds: float = 900.0
 
 
