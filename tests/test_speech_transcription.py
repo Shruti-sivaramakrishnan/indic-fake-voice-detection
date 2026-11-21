@@ -54,6 +54,36 @@ def test_audio_to_conversation_orchestration_is_end_to_end():
     }
 
 
+def test_audio_orchestration_includes_speaker_aware_result(monkeypatch):
+    import speech_transcription
+    from speaker_diarization import SpeakerTurn
+
+    transcription = TranscriptionResult(
+        "test-asr",
+        60.0,
+        (
+            TranscriptSegment(0, 5, "Thank you"),
+            TranscriptSegment(10, 15, "Urgent, send money and share the OTP"),
+        ),
+    )
+    monkeypatch.setattr(
+        speech_transcription,
+        "diarize_audio_bytes",
+        lambda payload, backend=None: (
+            SpeakerTurn(0, 6, "Speaker A", 0.9),
+            SpeakerTurn(9, 16, "Speaker B", 0.8),
+        ),
+    )
+    result = analyze_audio_conversation(
+        b"call", transcriber=lambda payload: transcription
+    )
+    assert result.speaker_analysis_error is None
+    assert [
+        segment.speaker_label for segment in result.speaker_analysis.segments
+    ] == ["Speaker A", "Speaker B"]
+    assert result.speaker_analysis.speakers[1].conversation.risk_level == "High"
+
+
 def test_transcribe_validates_and_invokes_injected_pipeline(monkeypatch):
     import model_pipeline
 

@@ -1,0 +1,5 @@
+language,cases,risk_accuracy,category_precision,category_recall,category_f1,benign_cases,false_positive_rate,mean_wer,mean_cer
+English,4,1.0,1.0,1.0,1.0,2,0.0,0.0,0.0
+Hindi,4,1.0,1.0,1.0,1.0,2,0.0,0.0,0.0
+Kannada,4,1.0,1.0,1.0,1.0,2,0.0,0.0,0.0
+Tamil,4,1.0,1.0,1.0,1.0,2,0.0,0.25,0.3333333333333333

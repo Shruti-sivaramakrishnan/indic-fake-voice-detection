@@ -402,6 +402,8 @@ def render_conversation_report(
     transcript_segments,
     source_label: str,
     model_id: str | None = None,
+    speaker_analysis=None,
+    speaker_analysis_error: str | None = None,
 ) -> None:
     details = source_label if model_id is None else f"{source_label} · {model_id}"
     st.caption(details)
@@ -416,11 +418,29 @@ def render_conversation_report(
             "categories were found. Review the highlighted transcript segments."
         )
     with st.expander("Review generated transcript", expanded=False):
+        speaker_by_interval = {}
+        if speaker_analysis is not None:
+            speaker_by_interval = {
+                (segment.start_seconds, segment.end_seconds, segment.text): segment
+                for segment in speaker_analysis.segments
+            }
         st.dataframe(
             [
                 {
                     "start": format_call_time(segment.start_seconds),
                     "end": format_call_time(segment.end_seconds),
+                    "speaker": (
+                        speaker_by_interval[
+                            (segment.start_seconds, segment.end_seconds, segment.text)
+                        ].speaker_label
+                        if (
+                            segment.start_seconds,
+                            segment.end_seconds,
+                            segment.text,
+                        )
+                        in speaker_by_interval
+                        else "—"
+                    ),
                     "text": segment.text,
                 }
                 for segment in transcript_segments
@@ -455,6 +475,31 @@ def render_conversation_report(
             "No configured urgency, secrecy, payment, credential, authority, "
             "or pressure phrases were found."
         )
+    if speaker_analysis is not None:
+        st.markdown("#### Speaker-aware review")
+        st.caption(
+            "Anonymous acoustic clusters only—Speaker A/B are not identities. "
+            f"Backend: {speaker_analysis.backend_id}."
+        )
+        st.dataframe(
+            [
+                {
+                    "speaker": summary.speaker_label,
+                    "segments": summary.segment_count,
+                    "speaking time": format_call_time(summary.speaking_seconds),
+                    "tone": summary.conversation.tone,
+                    "risk": summary.conversation.risk_level,
+                    "cue categories": (
+                        ", ".join(summary.conversation.category_counts) or "none"
+                    ),
+                }
+                for summary in speaker_analysis.speakers
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+    elif speaker_analysis_error:
+        st.info(f"Speaker-aware review unavailable: {speaker_analysis_error}")
 
 
 def render_call_analysis(lang: str) -> None:
@@ -733,6 +778,8 @@ def render_call_analysis(lang: str) -> None:
             automatic_result.transcription.segments,
             "Automatically generated transcript",
             automatic_result.transcription.model_id,
+            automatic_result.speaker_analysis,
+            automatic_result.speaker_analysis_error,
         )
 
     st.markdown("#### Timestamped transcript fallback")

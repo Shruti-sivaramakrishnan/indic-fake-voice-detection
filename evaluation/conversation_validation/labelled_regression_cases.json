@@ -1,0 +1,122 @@
+[
+  {
+    "case_id": "en_benign_01",
+    "language": "English",
+    "expected_risk": "Low",
+    "expected_categories": [],
+    "segments": [{"start_seconds": 0, "end_seconds": 4, "text": "Thank you for calling, have a good day."}],
+    "reference_transcript": "thank you for calling have a good day",
+    "hypothesis_transcript": "thank you for calling have a good day"
+  },
+  {
+    "case_id": "en_medium_01",
+    "language": "English",
+    "expected_risk": "Medium",
+    "expected_categories": ["urgency", "credential_or_otp"],
+    "segments": [{"start_seconds": 2, "end_seconds": 8, "text": "This is urgent. Share the OTP right now."}]
+  },
+  {
+    "case_id": "en_high_01",
+    "language": "English",
+    "expected_risk": "High",
+    "expected_categories": ["secrecy", "money_or_payment", "pressure_or_threat"],
+    "segments": [{"start_seconds": 5, "end_seconds": 12, "text": "Don't tell anyone. Transfer money or your account will be blocked."}]
+  },
+  {
+    "case_id": "en_benign_02",
+    "language": "English",
+    "expected_risk": "Low",
+    "expected_categories": [],
+    "segments": [{"start_seconds": 0, "end_seconds": 5, "text": "The meeting starts tomorrow after lunch."}]
+  },
+  {
+    "case_id": "hi_benign_01",
+    "language": "Hindi",
+    "expected_risk": "Low",
+    "expected_categories": [],
+    "segments": [{"start_seconds": 0, "end_seconds": 4, "text": "पूसा भाजी आज बाजार में मिली। धन्यवाद।"}],
+    "reference_transcript": "पूसा भाजी आज बाजार में मिली",
+    "hypothesis_transcript": "पूसा भाजी आज बाजार में मिली"
+  },
+  {
+    "case_id": "hi_medium_01",
+    "language": "Hindi",
+    "expected_risk": "Medium",
+    "expected_categories": ["money_or_payment"],
+    "segments": [{"start_seconds": 2, "end_seconds": 6, "text": "कृपया पैसे भेजो।"}]
+  },
+  {
+    "case_id": "hi_high_01",
+    "language": "Hindi",
+    "expected_risk": "High",
+    "expected_categories": ["authority_or_familiarity", "credential_or_otp", "secrecy"],
+    "segments": [{"start_seconds": 3, "end_seconds": 10, "text": "मैं बैंक से बोल रहा हूँ, किसी को मत बताना और ओटीपी बताइए।"}]
+  },
+  {
+    "case_id": "hi_benign_02",
+    "language": "Hindi",
+    "expected_risk": "Low",
+    "expected_categories": [],
+    "segments": [{"start_seconds": 0, "end_seconds": 5, "text": "अभी नहीं, हम कल बात करेंगे।"}]
+  },
+  {
+    "case_id": "ta_benign_01",
+    "language": "Tamil",
+    "expected_risk": "Low",
+    "expected_categories": [],
+    "segments": [{"start_seconds": 0, "end_seconds": 4, "text": "நன்றி, நாளை மீண்டும் பேசலாம்."}],
+    "reference_transcript": "நன்றி நாளை மீண்டும் பேசலாம்",
+    "hypothesis_transcript": "நன்றி நாளை பேசலாம்"
+  },
+  {
+    "case_id": "ta_medium_01",
+    "language": "Tamil",
+    "expected_risk": "Medium",
+    "expected_categories": ["urgency", "money_or_payment"],
+    "segments": [{"start_seconds": 2, "end_seconds": 7, "text": "உடனே பணம் அனுப்பு."}]
+  },
+  {
+    "case_id": "ta_high_01",
+    "language": "Tamil",
+    "expected_risk": "High",
+    "expected_categories": ["authority_or_familiarity", "credential_or_otp", "secrecy"],
+    "segments": [{"start_seconds": 4, "end_seconds": 11, "text": "நான் வங்கியிலிருந்து பேசுகிறேன். ரகசியம், ஓடிபி சொல்லுங்கள்."}]
+  },
+  {
+    "case_id": "ta_benign_02",
+    "language": "Tamil",
+    "expected_risk": "Low",
+    "expected_categories": [],
+    "segments": [{"start_seconds": 0, "end_seconds": 5, "text": "நல்ல இசையை இன்று கேட்டேன்."}]
+  },
+  {
+    "case_id": "kn_benign_01",
+    "language": "Kannada",
+    "expected_risk": "Low",
+    "expected_categories": [],
+    "segments": [{"start_seconds": 0, "end_seconds": 4, "text": "ಧನ್ಯವಾದ, ನಾಳೆ ಮತ್ತೆ ಮಾತನಾಡೋಣ."}],
+    "reference_transcript": "ಧನ್ಯವಾದ ನಾಳೆ ಮತ್ತೆ ಮಾತನಾಡೋಣ",
+    "hypothesis_transcript": "ಧನ್ಯವಾದ ನಾಳೆ ಮತ್ತೆ ಮಾತನಾಡೋಣ"
+  },
+  {
+    "case_id": "kn_medium_01",
+    "language": "Kannada",
+    "expected_risk": "Medium",
+    "expected_categories": ["urgency", "money_or_payment"],
+    "segments": [{"start_seconds": 1, "end_seconds": 6, "text": "ತಕ್ಷಣ ಹಣ ಕಳುಹಿಸಿ."}]
+  },
+  {
+    "case_id": "kn_high_01",
+    "language": "Kannada",
+    "expected_risk": "High",
+    "expected_categories": ["authority_or_familiarity", "credential_or_otp", "secrecy"],
+    "segments": [{"start_seconds": 3, "end_seconds": 10, "text": "ನಾನು ಬ್ಯಾಂಕಿನಿಂದ ಕರೆ ಮಾಡುತ್ತಿದ್ದೇನೆ. ರಹಸ್ಯ, ಒಟಿಪಿ ತಿಳಿಸಿ."}]
+  },
+  {
+    "case_id": "kn_benign_02",
+    "language": "Kannada",
+    "expected_risk": "Low",
+    "expected_categories": [],
+    "segments": [{"start_seconds": 0, "end_seconds": 5, "text": "ಒಳ್ಳೆಯ ಪುಸ್ತಕವನ್ನು ಇಂದು ಓದಿದೆ."}]
+  }
+]

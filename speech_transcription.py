@@ -19,6 +19,12 @@ from conversation_analysis import (
     TranscriptSegment,
     analyze_transcript,
 )
+from speaker_diarization import (
+    DiarizationError,
+    SpeakerAwareReport,
+    build_speaker_aware_report,
+    diarize_audio_bytes,
+)
 
 
 DEFAULT_ASR_MODEL = "openai/whisper-base"
@@ -44,6 +50,8 @@ class TranscriptionResult:
 class AudioConversationResult:
     transcription: TranscriptionResult
     conversation: ConversationReport
+    speaker_analysis: SpeakerAwareReport | None = None
+    speaker_analysis_error: str | None = None
 
 
 def _asr_device() -> tuple[object, object]:
@@ -165,14 +173,26 @@ def transcribe_audio_bytes(
 def analyze_audio_conversation(
     audio_bytes: bytes,
     transcriber: Callable[[bytes], TranscriptionResult] | None = None,
+    diarizer=None,
 ) -> AudioConversationResult:
-    """Run the complete audio to transcript to conversation-cue workflow."""
+    """Run ASR, conversation cues, and anonymous speaker-aware analysis."""
     transcription = (
         transcriber(audio_bytes)
         if transcriber is not None
         else transcribe_audio_bytes(audio_bytes)
     )
+    speaker_analysis = None
+    speaker_error = None
+    try:
+        turns = diarize_audio_bytes(audio_bytes, backend=diarizer)
+        speaker_analysis = build_speaker_aware_report(transcription.segments, turns)
+    except DiarizationError as exc:
+        # Transcription and whole-call analysis remain useful if acoustic
+        # clustering is unavailable for a particular recording.
+        speaker_error = str(exc)
     return AudioConversationResult(
         transcription=transcription,
         conversation=analyze_transcript(transcription.segments),
+        speaker_analysis=speaker_analysis,
+        speaker_analysis_error=speaker_error,
     )

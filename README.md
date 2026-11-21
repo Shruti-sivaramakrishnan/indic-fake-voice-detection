@@ -116,6 +116,8 @@ The notebook reads the token from Kaggle Secrets and never prints it. Do not pas
 - `codec_robustness.py` - in-memory FFmpeg channel simulations and score comparison
 - `speech_transcription.py` - multilingual timestamped ASR and audio-to-conversation orchestration
 - `conversation_analysis.py` - lexical tone and manipulation-cue risk screening
+- `speaker_diarization.py` - offline anonymous speaker clustering, transcript alignment, and per-speaker risk summaries
+- `conversation_validation.py` - multilingual risk/category and ASR error metrics
 - `voice_guard_core.py` - dependency-light input and decision policies
 - `model_pipeline.py` - frontend, heads, training, inference, and evaluation
 - `evidence_report.py` - automated analysis PDF
@@ -155,14 +157,36 @@ set `VOICE_GUARD_ASR_MODEL` to another compatible checkpoint or
 The first run downloads the ASR model and CPU transcription can take several
 minutes for a long recording.
 
+The same action now runs an offline acoustic clustering baseline, labels turns as
+anonymous `Speaker A`/`Speaker B` clusters, aligns ASR segments by timestamp, and
+shows tone, conversation risk, and cue categories separately for each speaker.
+It does not identify people. The dependency-light backend is suitable for a
+reproducible demo and can be replaced through its injected backend interface;
+overlapping speech and difficult acoustic conditions remain limitations.
+
 If ASR is unavailable, a timestamped UTF-8 CSV with `start_seconds`,
 `end_seconds`, and `text` columns remains available as a fallback. A ready-to-use
 example is at `docs/sample_call_transcript.csv`.
 
-Conversation analysis does not separate speakers, infer intent, or prove fraud.
+Conversation analysis does not infer intent or prove fraud.
 Whisper can mis-transcribe accents, code-switching, noise, names, numbers, and
-low-resource languages. A labelled benign/manipulative multilingual evaluation
-set and speaker diarization remain future validation work.
+low-resource languages.
+
+### Multilingual conversation validation
+
+Run the checked-in 16-case English/Hindi/Tamil/Kannada regression fixture with:
+
+```bash
+python evaluation/run_conversation_validation.py
+```
+
+The command regenerates `validation_summary.json` and
+`per_language_metrics.csv`, checks risk accuracy, category precision/recall/F1,
+benign false-positive rate, and optional Unicode-safe WER/CER. The fixture is an
+acceptance/regression suite designed to catch known failures, not a representative
+population benchmark. Production claims require a larger independently labelled
+set with natural calls, code-switching, noisy channels, speaker-turn references,
+and confidence intervals.
 
 ## Important limitations
 

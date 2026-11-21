@@ -1,0 +1,340 @@
+{
+  "suite_scope": "labelled regression and acceptance fixture; not a population benchmark",
+  "overall": {
+    "cases": 16,
+    "risk_accuracy": 1.0,
+    "category_precision": 1.0,
+    "category_recall": 1.0,
+    "category_f1": 1.0,
+    "benign_cases": 8,
+    "false_positive_rate": 0.0,
+    "mean_wer": 0.0625,
+    "mean_cer": 0.08333333333333333
+  },
+  "by_language": {
+    "English": {
+      "cases": 4,
+      "risk_accuracy": 1.0,
+      "category_precision": 1.0,
+      "category_recall": 1.0,
+      "category_f1": 1.0,
+      "benign_cases": 2,
+      "false_positive_rate": 0.0,
+      "mean_wer": 0.0,
+      "mean_cer": 0.0
+    },
+    "Hindi": {
+      "cases": 4,
+      "risk_accuracy": 1.0,
+      "category_precision": 1.0,
+      "category_recall": 1.0,
+      "category_f1": 1.0,
+      "benign_cases": 2,
+      "false_positive_rate": 0.0,
+      "mean_wer": 0.0,
+      "mean_cer": 0.0
+    },
+    "Kannada": {
+      "cases": 4,
+      "risk_accuracy": 1.0,
+      "category_precision": 1.0,
+      "category_recall": 1.0,
+      "category_f1": 1.0,
+      "benign_cases": 2,
+      "false_positive_rate": 0.0,
+      "mean_wer": 0.0,
+      "mean_cer": 0.0
+    },
+    "Tamil": {
+      "cases": 4,
+      "risk_accuracy": 1.0,
+      "category_precision": 1.0,
+      "category_recall": 1.0,
+      "category_f1": 1.0,
+      "benign_cases": 2,
+      "false_positive_rate": 0.0,
+      "mean_wer": 0.25,
+      "mean_cer": 0.3333333333333333
+    }
+  },
+  "cases": [
+    {
+      "case_id": "en_benign_01",
+      "language": "English",
+      "expected_risk": "Low",
+      "predicted_risk": "Low",
+      "risk_correct": true,
+      "expected_categories": [],
+      "predicted_categories": [],
+      "category_tp": 0,
+      "category_fp": 0,
+      "category_fn": 0,
+      "wer": 0.0,
+      "cer": 0.0
+    },
+    {
+      "case_id": "en_medium_01",
+      "language": "English",
+      "expected_risk": "Medium",
+      "predicted_risk": "Medium",
+      "risk_correct": true,
+      "expected_categories": [
+        "credential_or_otp",
+        "urgency"
+      ],
+      "predicted_categories": [
+        "credential_or_otp",
+        "urgency"
+      ],
+      "category_tp": 2,
+      "category_fp": 0,
+      "category_fn": 0,
+      "wer": null,
+      "cer": null
+    },
+    {
+      "case_id": "en_high_01",
+      "language": "English",
+      "expected_risk": "High",
+      "predicted_risk": "High",
+      "risk_correct": true,
+      "expected_categories": [
+        "money_or_payment",
+        "pressure_or_threat",
+        "secrecy"
+      ],
+      "predicted_categories": [
+        "money_or_payment",
+        "pressure_or_threat",
+        "secrecy"
+      ],
+      "category_tp": 3,
+      "category_fp": 0,
+      "category_fn": 0,
+      "wer": null,
+      "cer": null
+    },
+    {
+      "case_id": "en_benign_02",
+      "language": "English",
+      "expected_risk": "Low",
+      "predicted_risk": "Low",
+      "risk_correct": true,
+      "expected_categories": [],
+      "predicted_categories": [],
+      "category_tp": 0,
+      "category_fp": 0,
+      "category_fn": 0,
+      "wer": null,
+      "cer": null
+    },
+    {
+      "case_id": "hi_benign_01",
+      "language": "Hindi",
+      "expected_risk": "Low",
+      "predicted_risk": "Low",
+      "risk_correct": true,
+      "expected_categories": [],
+      "predicted_categories": [],
+      "category_tp": 0,
+      "category_fp": 0,
+      "category_fn": 0,
+      "wer": 0.0,
+      "cer": 0.0
+    },
+    {
+      "case_id": "hi_medium_01",
+      "language": "Hindi",
+      "expected_risk": "Medium",
+      "predicted_risk": "Medium",
+      "risk_correct": true,
+      "expected_categories": [
+        "money_or_payment"
+      ],
+      "predicted_categories": [
+        "money_or_payment"
+      ],
+      "category_tp": 1,
+      "category_fp": 0,
+      "category_fn": 0,
+      "wer": null,
+      "cer": null
+    },
+    {
+      "case_id": "hi_high_01",
+      "language": "Hindi",
+      "expected_risk": "High",
+      "predicted_risk": "High",
+      "risk_correct": true,
+      "expected_categories": [
+        "authority_or_familiarity",
+        "credential_or_otp",
+        "secrecy"
+      ],
+      "predicted_categories": [
+        "authority_or_familiarity",
+        "credential_or_otp",
+        "secrecy"
+      ],
+      "category_tp": 3,
+      "category_fp": 0,
+      "category_fn": 0,
+      "wer": null,
+      "cer": null
+    },
+    {
+      "case_id": "hi_benign_02",
+      "language": "Hindi",
+      "expected_risk": "Low",
+      "predicted_risk": "Low",
+      "risk_correct": true,
+      "expected_categories": [],
+      "predicted_categories": [],
+      "category_tp": 0,
+      "category_fp": 0,
+      "category_fn": 0,
+      "wer": null,
+      "cer": null
+    },
+    {
+      "case_id": "ta_benign_01",
+      "language": "Tamil",
+      "expected_risk": "Low",
+      "predicted_risk": "Low",
+      "risk_correct": true,
+      "expected_categories": [],
+      "predicted_categories": [],
+      "category_tp": 0,
+      "category_fp": 0,
+      "category_fn": 0,
+      "wer": 0.25,
+      "cer": 0.3333333333333333
+    },
+    {
+      "case_id": "ta_medium_01",
+      "language": "Tamil",
+      "expected_risk": "Medium",
+      "predicted_risk": "Medium",
+      "risk_correct": true,
+      "expected_categories": [
+        "money_or_payment",
+        "urgency"
+      ],
+      "predicted_categories": [
+        "money_or_payment",
+        "urgency"
+      ],
+      "category_tp": 2,
+      "category_fp": 0,
+      "category_fn": 0,
+      "wer": null,
+      "cer": null
+    },
+    {
+      "case_id": "ta_high_01",
+      "language": "Tamil",
+      "expected_risk": "High",
+      "predicted_risk": "High",
+      "risk_correct": true,
+      "expected_categories": [
+        "authority_or_familiarity",
+        "credential_or_otp",
+        "secrecy"
+      ],
+      "predicted_categories": [
+        "authority_or_familiarity",
+        "credential_or_otp",
+        "secrecy"
+      ],
+      "category_tp": 3,
+      "category_fp": 0,
+      "category_fn": 0,
+      "wer": null,
+      "cer": null
+    },
+    {
+      "case_id": "ta_benign_02",
+      "language": "Tamil",
+      "expected_risk": "Low",
+      "predicted_risk": "Low",
+      "risk_correct": true,
+      "expected_categories": [],
+      "predicted_categories": [],
+      "category_tp": 0,
+      "category_fp": 0,
+      "category_fn": 0,
+      "wer": null,
+      "cer": null
+    },
+    {
+      "case_id": "kn_benign_01",
+      "language": "Kannada",
+      "expected_risk": "Low",
+      "predicted_risk": "Low",
+      "risk_correct": true,
+      "expected_categories": [],
+      "predicted_categories": [],
+      "category_tp": 0,
+      "category_fp": 0,
+      "category_fn": 0,
+      "wer": 0.0,
+      "cer": 0.0
+    },
+    {
+      "case_id": "kn_medium_01",
+      "language": "Kannada",
+      "expected_risk": "Medium",
+      "predicted_risk": "Medium",
+      "risk_correct": true,
+      "expected_categories": [
+        "money_or_payment",
+        "urgency"
+      ],
+      "predicted_categories": [
+        "money_or_payment",
+        "urgency"
+      ],
+      "category_tp": 2,
+      "category_fp": 0,
+      "category_fn": 0,
+      "wer": null,
+      "cer": null
+    },
+    {
+      "case_id": "kn_high_01",
+      "language": "Kannada",
+      "expected_risk": "High",
+      "predicted_risk": "High",
+      "risk_correct": true,
+      "expected_categories": [
+        "authority_or_familiarity",
+        "credential_or_otp",
+        "secrecy"
+      ],
+      "predicted_categories": [
+        "authority_or_familiarity",
+        "credential_or_otp",
+        "secrecy"
+      ],
+      "category_tp": 3,
+      "category_fp": 0,
+      "category_fn": 0,
+      "wer": null,
+      "cer": null
+    },
+    {
+      "case_id": "kn_benign_02",
+      "language": "Kannada",
+      "expected_risk": "Low",
+      "predicted_risk": "Low",
+      "risk_correct": true,
+      "expected_categories": [],
+      "predicted_categories": [],
+      "category_tp": 0,
+      "category_fp": 0,
+      "category_fn": 0,
+      "wer": null,
+      "cer": null
+    }
+  ]
+}
